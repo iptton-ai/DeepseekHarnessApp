@@ -2,7 +2,11 @@
 // 只消费 ChatViewModel(ChangeNotifier),不含任何 socket/HTTP 逻辑。
 import 'package:flutter/material.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/sessions/interactor_store.dart';
+import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/interactor_widgets.dart';
+import 'package:singleman/ui/interactor_widgets.dart';
 
 class ChatScreen extends StatelessWidget {
   const ChatScreen({super.key, required this.vm, this.onNewSession});
@@ -19,7 +23,33 @@ class ChatScreen extends StatelessWidget {
             children: [
               _Sidebar(vm: vm, onNewSession: onNewSession),
               const VerticalDivider(width: 1),
-              Expanded(child: _MessagePane(vm: vm)),
+              Expanded(
+                child: _MessagePane(
+                  vm: vm,
+                  onApproval: (a, allow) => vm.interactor?.respondApproval(
+                      a.rpcId, a.sessionId, a.approvalId,
+                      allow: allow),
+                  onQuestion: (q, drafts) {
+                    final it = vm.interactor;
+                    if (it == null) return;
+                    final err = it.validateQuestionAnswers(q, drafts);
+                    if (err != null) {
+                      vm.lastError = '应答被本地预校验拒绝: ' + err;
+                      vm.notifyListeners();
+                      return;
+                    }
+                    final payload = drafts
+                        .map((d) => <String, dynamic>{
+                              'id': d.questionId,
+                              'selected': d.selected,
+                              if (d.custom != null && d.custom!.isNotEmpty) 'custom': d.custom,
+                            })
+                        .toList();
+                    it.respondQuestions(q.rpcId, q.sessionId, payload);
+                  },
+                  onQueueRemove: null,
+                ),
+              ),
             ],
           ),
         );
@@ -156,8 +186,16 @@ class _PhaseBadge extends StatelessWidget {
 }
 
 class _MessagePane extends StatelessWidget {
-  const _MessagePane({required this.vm});
+  const _MessagePane({
+    required this.vm,
+    this.onApproval,
+    this.onQuestion,
+    this.onQueueRemove,
+  });
   final ChatViewModel vm;
+  final void Function(PendingApproval a, bool allow)? onApproval;
+  final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
+  final void Function(Map<String, dynamic> item)? onQueueRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -203,6 +241,7 @@ class _MessagePane extends StatelessWidget {
                   },
                 ),
         ),
+        _InteractorPane(vm: vm, onApproval: onApproval, onQuestion: onQuestion, onQueueRemove: onQueueRemove),
         if (vm.lastError != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
@@ -269,6 +308,60 @@ extension on ChatViewModel {
   Future<void> Function(String, String) _senderOf(BuildContext context) {
     // 由 main.dart 注入真实发送器;这里无法拿到 store,采用注册回调。
     return ChatSenderBinding.of(context);
+  }
+}
+
+/// 交互帧面板:审批卡 + 问答表单 + 队列 Dock,自订阅 interactor 流。
+class _InteractorPane extends StatefulWidget {
+  const _InteractorPane({
+    required this.vm,
+    this.onApproval,
+    this.onQuestion,
+    this.onQueueRemove,
+  });
+  final ChatViewModel vm;
+  final void Function(PendingApproval a, bool allow)? onApproval;
+  final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
+  final void Function(Map<String, dynamic> item)? onQueueRemove;
+
+  @override
+  State<_InteractorPane> createState() => _InteractorPaneState();
+}
+
+class _InteractorPaneState extends State<_InteractorPane> {
+  List<PendingApproval> _approvals = const [];
+  List<PendingQuestion> _questions = const [];
+  List<Map<String, dynamic>> _queue = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    final it = widget.vm.interactor;
+    if (it == null) return;
+    it.approvals.listen((l) {
+      if (mounted) setState(() => _approvals = l);
+    });
+    it.questions.listen((l) {
+      if (mounted) setState(() => _questions = l);
+    });
+    it.queues.listen((m) {
+      final sid = widget.vm.selectedId;
+      if (mounted && sid != null) {
+        setState(() => _queue = m[sid] ?? const []);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ApprovalCards(approvals: _approvals, onRespond: (a, allow) => widget.onApproval?.call(a, allow)),
+        for (final q in _questions)
+          QuestionForm(question: q, onSubmit: (drafts) => widget.onQuestion?.call(q, drafts)),
+        QueueDock(items: _queue, onRemove: widget.onQueueRemove),
+      ],
+    );
   }
 }
 

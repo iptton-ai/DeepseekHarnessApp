@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/sessions/event_text.dart';
+import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
@@ -73,6 +74,9 @@ class ChatViewModel extends ChangeNotifier {
   String? get selectedId => _selectedId;
   List<ChatBubble> get bubbles =>
       List.unmodifiable([..._bubbles, ..._ephemeral]);
+
+  // M3 交互帧(interactor 可为 null:纯聊天场景/测试)。
+  InteractorStore? interactor;
   bool get canSend =>
       phase == ConnectionPhase.ready &&
       _selectedId != null &&
