@@ -14,7 +14,7 @@ DSH 是插件化 agent harness,本机以 `dsh` CLI 运行,Web GUI 即其官方�
 | M1 连接控制器 | ✅ 完成(2026-08-14)— ApiClient + 整代重建状态机 + 故障注入 11 绿,接口冻结 |
 | M2 最小聊天环 | ✅ 完成(2026-08-14)— 活体真实对话 + 拔线重连验收(SMOKE-PASS),24 测试绿 |
 | M3 交互帧 | ✅ 完成(2026-08-14)— 审批卡/问答表单/队列 Dock + respond 信封,32 测试绿 |
-| M4+ 功能面 | ⬜ 未开始(模型选择/fork导出/search/图片/goal/skill/LAN 形态/markdown) |
+| M4+ 功能面 | 🔶 进行中 — ✅ 模型选择器/搜索/fork/重命名/导出 ZIP/markdown(38 测试绿);⬜ 图片附件/goal 面板/skill 菜单/手机 LAN 形态 |
 
 最新进度与下一步:**永远先读 `PROGRESS.md`**。
 
