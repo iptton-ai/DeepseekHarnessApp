@@ -66,6 +66,10 @@ abstract class SessionStoreView {
   Stream<List<SessionSummary>> get summaries;
   List<SessionSummary> get currentSummaries;
   SessionLog logFor(String sessionId);
+
+  /// 拉取(或翻页补齐)某会话的历史事件。VM 切换会话时调用;
+  /// 实现必须幂等安全(重复调用靠 seq 去重)。
+  Future<void> loadHistory(String sessionId);
 }
 
 class SessionStore implements SessionStoreView {
@@ -154,7 +158,10 @@ class SessionStore implements SessionStoreView {
 
   /// 装载历史尾页(beforeSeq 缺席 = 尾页,附带 projections 水位快照)。
   /// hasMore=true 时继续向前翻页直至取完。
+  /// UI 切换会话的默认路径(接口窄视图)固定 50 条/页,防超大单响应。
+  @override
   Future<void> loadHistory(String sessionId, {int? maxMessages}) async {
+    maxMessages ??= 50;
     var hasMore = true;
     int? beforeSeq;
     while (hasMore) {

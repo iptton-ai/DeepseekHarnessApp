@@ -26,6 +26,12 @@ class _FakeView implements SessionStoreView {
   SessionLog logFor(String sessionId) =>
       logs.putIfAbsent(sessionId, () => SessionLog(sessionId));
 
+  int historyLoads = 0;
+  @override
+  Future<void> loadHistory(String sessionId) async {
+    historyLoads += 1;
+  }
+
   void emit() {
     current = List.of(current);
     summariesController.add(current);
@@ -54,6 +60,24 @@ SessionEvent _msgEvent(int seq, String role, String text) => SessionEvent(
     );
 
 void main() {
+  test('select() triggers loadHistory and renders after events arrive', () async {
+    final view = _FakeView();
+    view.current = [_summary('s1')];
+    final log = view.logFor('s1');
+    final vm = ChatViewModel(store: view, connection: null);
+    view.emit();
+    await Future<void>.delayed(Duration.zero);
+    expect(view.historyLoads, 1); // 自动选中首会话即触发
+    vm.select('s2');
+    expect(view.historyLoads, 2); // 手动切换再触发
+    // 历史返回(模拟 loadHistory 后事件入 s2 的日志;选中项是 s2)→ 气泡出现。
+    final log2 = view.logFor('s2');
+    log2.append(_msgEvent(1, 'user', '历史消息'));
+    await Future<void>.delayed(Duration.zero);
+    expect(vm.bubbles.map((b) => b.text), contains('历史消息'));
+    vm.dispose();
+  });
+
   test('extractText pulls text blocks, skips images', () {
     expect(
       extractText(<String, dynamic>{

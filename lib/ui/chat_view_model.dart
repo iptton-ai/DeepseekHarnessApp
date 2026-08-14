@@ -98,6 +98,19 @@ class ChatViewModel extends ChangeNotifier {
       notifyListeners();
     });
     notifyListeners();
+    // 切换会话即拉历史(幂等:重复调用靠 seq 去重;日志非空时快速翻页补齐)。
+    _store.loadHistory(sessionId).then((_) {
+      if (_selectedId == sessionId) {
+        _rebuildFromLog(log);
+        _pruneEphemeral();
+        notifyListeners();
+      }
+    }).catchError((Object e) {
+      if (_selectedId == sessionId) {
+        lastError = '历史加载失败: ' + e.toString();
+        notifyListeners();
+      }
+    });
   }
 
   void _ensureSelection() {

@@ -15,6 +15,9 @@ class _EmptyView implements SessionStoreView {
   List<SessionSummary> get currentSummaries => const <SessionSummary>[];
   @override
   SessionLog logFor(String sessionId) => SessionLog(sessionId);
+
+  @override
+  Future<void> loadHistory(String sessionId) async {}
 }
 
 void main() {
