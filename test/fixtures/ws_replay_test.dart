@@ -35,6 +35,30 @@ void main() {
     expect(typeCounts['MuxFrameSessionSubscribed'], greaterThan(0));
   });
 
+  test('captured session/queue frames parse and fold (M3 fixture)', () {
+    final qf = File('fixtures/ws/queue-frames.jsonl');
+    if (!qf.existsSync()) {
+      markTestSkipped('no queue fixture; run dart run tool/codegen/capture_queue.dart');
+      return;
+    }
+    final lines = qf.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
+    expect(lines, isNotEmpty);
+    for (final line in lines) {
+      final rec = jsonDecode(line) as Map<String, dynamic>;
+      final envelope = RpcMessage.fromJson(rec['frame'] as Map<String, dynamic>);
+      expect(envelope, isA<RpcMessageServerRequest>());
+      final frame = MuxFrame.fromJson(
+          (envelope as RpcMessageServerRequest).payload as Map<String, dynamic>);
+      expect(frame, isA<MuxFrameSessionQueue>());
+      final q = frame as MuxFrameSessionQueue;
+      expect(q.sessionId, isNotEmpty);
+      for (final item in q.items) {
+        expect(item['id'], isA<String>());
+        expect(['queued', 'steering', 'context'], contains(item['placement']));
+      }
+    }
+  });
+
   test('captured host frames parse when present', () {
     if (!hostFile.existsSync()) {
       markTestSkipped('no host frames captured');
