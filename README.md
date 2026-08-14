@@ -11,8 +11,8 @@ DSH 是插件化 agent harness,本机以 `dsh` CLI 运行,Web GUI 即其官方�
 | 开发计划 | ✅ 完成 — 见 `docs/PLAN.md` |
 | 协议知识冻结 | ✅ 完成 — 见 `docs/DSH-PROTOCOL.md` |
 | M0 契约与测试床 | ✅ 完成(2026-08-14)— codegen 管线 + conformance 3 绿 + fixture 回放 2 绿 |
-| M1 连接控制器 | ⬜ 未开始(下一步) |
-| M2+ | ⬜ 未开始 |
+| M1 连接控制器 | ✅ 完成(2026-08-14)— ApiClient + 整代重建状态机 + 故障注入 11 绿,接口冻结 |
+| M2 最小聊天环 | ⬜ 未开始(下一步) |
 
 最新进度与下一步:**永远先读 `PROGRESS.md`**。
 

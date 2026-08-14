@@ -33,12 +33,12 @@
 - **验收**:生成的模型能解析活体主机的 describe 响应 ✅;版本钉死 ✅(manifest + 生成器双端断言,不匹配 exit 2)
 - **为什么先做**:风险最高、上下文收益最大;之后一切任务的地基
 
-### M1 连接控制器(串行,单负责人)
-- [ ] ApiClient:rpcId mint、信封 wrap/unwrap、30s unary 超时、错误折叠
-- [ ] 双 WS 下行管理:两条只收 socket、就绪握手(describe 成功+双 socket 打开)
-- [ ] 整代重建状态机:任一 socket 断 → 重建两流 + 重握手 + 重取 history;pending 审批/问答帧重放收敛
-- [ ] 接口冻结,写包 README
-- **验收**:拔线/杀主机/超时三类故障注入下状态机收敛
+### M1 连接控制器(串行,单负责人)✅ 2026-08-14 完成
+- [x] ApiClient:rpcId mint、信封 wrap/unwrap、30s unary 超时、错误折叠(RpcBusinessError/CarrierError/ApiTimeout 三级)
+- [x] 双 WS 下行管理:两条只收 socket、就绪握手(describe 成功+双 socket 打开;probeTimeout 独立节奏)
+- [x] 整代重建状态机:任一 socket 断 → 同代 down → 新代重建+重握手(指数退避 300ms→8s);重取 history 接口已备(muxFrames/snapshots 广播),M2 消费
+- [x] 接口冻结,写包 README(lib/connection/README.md)
+- **验收**:拔线/杀主机/超时三类故障注入下状态机收敛 ✅(test/connection 11 绿,假主机 test/helpers/fake_dsh_host.dart)
 
 ### M2 最小聊天环(可演示)
 - [ ] `workspace.list` + `session.create/list` + `session.prompt` + `session.history`(含 projections 尾页)
