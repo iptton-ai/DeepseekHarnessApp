@@ -142,6 +142,21 @@ class _SidebarState extends State<_Sidebar> {
               ),
             ),
           ),
+          if (widget.vm.phase == ConnectionPhase.down &&
+              widget.vm.failureReason != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+              child: Text(
+                '断线原因: ' +
+                    (widget.vm.failureReason!.length > 120
+                        ? widget.vm.failureReason!.substring(0, 120) + '…'
+                        : widget.vm.failureReason!),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 11, color: Theme.of(context).colorScheme.error),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
             child: TextField(

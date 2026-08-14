@@ -41,6 +41,20 @@ class ApiTimeout implements Exception {
   String toString() => 'ApiTimeout($method after ${limit.inMilliseconds}ms)';
 }
 
+/// 本应用的 HttpClient 工厂:强制直连(绕过系统/环境代理)。
+///
+/// 依据:部署形态只有 loopback(桌面)与 LAN(ADR-0004),公网被禁止;
+/// 而全局代理(如 Clash,常见端口 7890/7897)会拦截 loopback 流量并拒绝
+/// 转发,导致握手永远失败("已断开,重试中")。DIRECT 对本应用永远正确。
+HttpClient createDirectHttpClient() {
+  final client = HttpClient();
+  client.findProxy = directProxy;
+  return client;
+}
+
+/// 直连策略函数(独立可测;DIRECT = 永不走代理)。
+String directProxy(Uri url) => 'DIRECT';
+
 class ApiClient {
   ApiClient({
     required Uri baseUri,
@@ -48,7 +62,7 @@ class ApiClient {
     HttpClient? httpClient,
   })  : _baseUri = baseUri,
         _defaultTimeout = defaultTimeout,
-        _httpClient = httpClient ?? HttpClient();
+        _httpClient = (httpClient ?? createDirectHttpClient());
 
   final Uri _baseUri;
   final Duration _defaultTimeout;

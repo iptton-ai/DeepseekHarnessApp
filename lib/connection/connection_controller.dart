@@ -9,6 +9,7 @@
 //
 // 接口冻结自本文件(详见 connection/README.md)。
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:singleman/connection/api_client.dart';
@@ -51,6 +52,9 @@ class ConnectionController {
   final Duration _maxBackoff;
   final Duration _probeTimeout;
   final ApiClient apiClient;
+  /// WS 专用直连 client(WebSocket.connect 不吃 ApiClient 的 HttpClient,
+  /// 必须显式注入,否则系统代理会拦截 upgrade 请求)。
+  final HttpClient _wsClient = createDirectHttpClient();
 
   final _snapshots = StreamController<ConnectionSnapshot>.broadcast();
   final _muxFrames = StreamController<MuxFrame>.broadcast();
@@ -102,6 +106,7 @@ class ConnectionController {
     await _protocolErrors.close();
     await _addressedMux.close();
     apiClient.dispose();
+    _wsClient.close();
   }
 
   void _emit(ConnectionSnapshot snap) {
@@ -124,8 +129,8 @@ class ConnectionController {
       timeout: _probeTimeout,
     );
 
-    final muxFuture = Downlink.connect('mux', _muxUri);
-    final hostFuture = Downlink.connect('host', _hostUri);
+    final muxFuture = Downlink.connect('mux', _muxUri, customClient: _wsClient);
+    final hostFuture = Downlink.connect('host', _hostUri, customClient: _wsClient);
 
     try {
       final results = await Future.wait(<Future<Object>>[

@@ -51,6 +51,7 @@ class ChatViewModel extends ChangeNotifier {
     _connection?.snapshots.listen((snap) {
       phase = snap.phase;
       generation = snap.generation;
+      failureReason = snap.failureReason;
       if (snap.phase == ConnectionPhase.ready) describe = snap.describe;
       notifyListeners();
     });
@@ -68,6 +69,7 @@ class ChatViewModel extends ChangeNotifier {
   ConnectionPhase phase = ConnectionPhase.connecting;
   int generation = 0;
   HostDescribeValue? describe;
+  String? failureReason;
   String? lastError;
 
   List<SessionSummary> get sessions => List.unmodifiable(_sessions);

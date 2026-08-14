@@ -22,6 +22,14 @@ void main() {
     await host.stop();
   });
 
+  test('direct proxy policy is DIRECT for every target', () {
+    // findProxy 只有 setter 在公开接口,策略函数独立导出供测试。
+    expect(directProxy(Uri.parse('http://127.0.0.1:3080')), 'DIRECT');
+    expect(directProxy(Uri.parse('http://192.168.1.10:3080')), 'DIRECT');
+    final client = createDirectHttpClient();
+    client.close();
+  });
+
   test('describe round trip: envelope + typed value', () async {
     final value = await client.call(
       RpcMethods.hostDescribe,
