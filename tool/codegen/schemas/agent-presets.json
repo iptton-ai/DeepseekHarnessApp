@@ -1,0 +1,300 @@
+{
+  "module": "agent-presets.schema.js",
+  "dshVersion": "0.1.0-rc.6",
+  "schemas": {
+    "agentPresetCopyRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentPreset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetCopyValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetEntrySchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trust": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "system"
+            },
+            {
+              "type": "string",
+              "const": "user"
+            }
+          ]
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "broken": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "id",
+        "trust",
+        "isDefault"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetListRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "agentPresetListValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "presets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "trust": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "system"
+                  },
+                  {
+                    "type": "string",
+                    "const": "user"
+                  }
+                ]
+              },
+              "isDefault": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "broken": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "id",
+              "trust",
+              "isDefault"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "authorable": {
+          "type": "boolean"
+        },
+        "hasDocument": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "presets",
+        "authorable",
+        "hasDocument"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetOpenDocumentRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetOpenDocumentValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "opened": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "opened"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "opened": {
+              "type": "boolean",
+              "const": false
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "opened",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "agentPresetReadRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetReadValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string"
+        },
+        "trust": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "system"
+            },
+            {
+              "type": "string",
+              "const": "user"
+            }
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentPreset",
+        "trust",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetRemoveRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetRemoveValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "agentPresetSelectRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentPreset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "sessionId",
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    },
+    "agentPresetSelectValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agentPreset": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentPreset"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

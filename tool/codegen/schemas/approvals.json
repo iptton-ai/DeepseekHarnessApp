@@ -1,0 +1,43 @@
+{
+  "module": "approvals.schema.js",
+  "dshVersion": "0.1.0-rc.6",
+  "schemas": {
+    "approvalRequestIdSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "string",
+      "minLength": 1
+    },
+    "approvalResponsePayloadSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approvalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "allowed-once"
+            },
+            {
+              "type": "string",
+              "const": "rejected"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "approvalId",
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

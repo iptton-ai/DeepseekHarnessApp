@@ -1,0 +1,536 @@
+{
+  "module": "settings.schema.js",
+  "dshVersion": "0.1.0-rc.6",
+  "schemas": {
+    "settingsDescribeRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "settingsDescribeValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "writable": {
+          "type": "boolean"
+        },
+        "hasDocument": {
+          "type": "boolean"
+        },
+        "namespaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ns": {
+                "type": "string",
+                "minLength": 1
+              },
+              "schema": {},
+              "value": {},
+              "base": {},
+              "user": {},
+              "applies": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  {
+                    "type": "string",
+                    "const": "restart"
+                  }
+                ]
+              },
+              "secrets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "set": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "set"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "revision": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "ns",
+              "schema",
+              "value",
+              "applies",
+              "secrets",
+              "revision"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "writable",
+        "hasDocument",
+        "namespaces"
+      ],
+      "additionalProperties": false
+    },
+    "settingsMutateRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ops": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set"
+                  },
+                  "path": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "value": {}
+                },
+                "required": [
+                  "op",
+                  "path",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "unset"
+                  },
+                  "path": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "op",
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "expectedRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "ops"
+      ],
+      "additionalProperties": false
+    },
+    "settingsMutateValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {},
+        "value": {},
+        "base": {},
+        "user": {},
+        "applies": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "live"
+            },
+            {
+              "type": "string",
+              "const": "restart"
+            }
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "set": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "set"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "schema",
+        "value",
+        "applies",
+        "secrets",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "settingsNamespaceViewSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {},
+        "value": {},
+        "base": {},
+        "user": {},
+        "applies": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "live"
+            },
+            {
+              "type": "string",
+              "const": "restart"
+            }
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "set": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "set"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "schema",
+        "value",
+        "applies",
+        "secrets",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "settingsOpenDocumentRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "settingsOpenDocumentValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "opened": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "opened"
+      ],
+      "additionalProperties": false
+    },
+    "settingsPathOpSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "set"
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "value": {}
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "unset"
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "settingsReplaceRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "section": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "expectedRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "section"
+      ],
+      "additionalProperties": false
+    },
+    "settingsReplaceValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {},
+        "value": {},
+        "base": {},
+        "user": {},
+        "applies": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "live"
+            },
+            {
+              "type": "string",
+              "const": "restart"
+            }
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "set": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "set"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "schema",
+        "value",
+        "applies",
+        "secrets",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "settingsSecretViewSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "set"
+      ],
+      "additionalProperties": false
+    },
+    "settingsUpdateRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "patch": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "expectedRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "patch"
+      ],
+      "additionalProperties": false
+    },
+    "settingsUpdateValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "ns": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {},
+        "value": {},
+        "base": {},
+        "user": {},
+        "applies": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "live"
+            },
+            {
+              "type": "string",
+              "const": "restart"
+            }
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "set": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "set"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ns",
+        "schema",
+        "value",
+        "applies",
+        "secrets",
+        "revision"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

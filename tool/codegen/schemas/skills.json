@@ -1,0 +1,82 @@
+{
+  "module": "skills.schema.js",
+  "dshVersion": "0.1.0-rc.6",
+  "schemas": {
+    "skillEntrySchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "whenToUse": {
+          "type": "string"
+        },
+        "modelInvocable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "modelInvocable"
+      ],
+      "additionalProperties": false
+    },
+    "skillListRequestSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "skillListValueSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "whenToUse": {
+                "type": "string"
+              },
+              "modelInvocable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "modelInvocable"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "skills"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "module": "downloads.schema.js",
+  "dshVersion": "0.1.0-rc.6",
+  "schemas": {
+    "sessionLogQuerySchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  }
+}
