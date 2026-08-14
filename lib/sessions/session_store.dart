@@ -59,7 +59,14 @@ class SessionLog {
   Future<void> dispose() => _eventsController.close();
 }
 
-class SessionStore {
+/// UI 依赖的窄视图(便于 widget 测试用假实现注入,不碰 socket)。
+abstract class SessionStoreView {
+  Stream<List<SessionSummary>> get summaries;
+  List<SessionSummary> get currentSummaries;
+  SessionLog logFor(String sessionId);
+}
+
+class SessionStore implements SessionStoreView {
   SessionStore({required this.api, required this.connection}) {
     _summariesController = StreamController<List<SessionSummary>>.broadcast();
   }
@@ -90,11 +97,14 @@ class SessionStore {
     if (_started) return;
     _started = true;
     _snapshotsSub = connection.snapshots.listen((snap) {
-      if (snap.phase == ConnectionPhase.ready &&
+      if (!_disposed &&
+          snap.phase == ConnectionPhase.ready &&
           snap.generation > _lastReadyGeneration) {
         _lastReadyGeneration = snap.generation;
         // 重连=全量重取(无 since);已积累的事件日志靠 seq 去重保留。
-        unawaited(refresh());
+        unawaited(refresh().catchError((Object e) {
+          // dispose 竞态下的连接取消不外泄(refresh 由下一次代际重试)。
+        }));
       }
     });
     _muxSub = connection.muxFrames.listen(_onMuxFrame);
@@ -109,6 +119,7 @@ class SessionStore {
   }
 
   Future<void> dispose() async {
+    _disposed = true;
     await _snapshotsSub?.cancel();
     await _muxSub?.cancel();
     await _hostSub?.cancel();
@@ -118,8 +129,11 @@ class SessionStore {
     await _summariesController.close();
   }
 
+  bool _disposed = false;
+
   /// 全量重取会话列表。
   Future<void> refresh() async {
+    if (_disposed) return;
     final value = await api.call(
       RpcMethods.sessionList,
       <String, dynamic>{},
@@ -170,6 +184,30 @@ class SessionStore {
         hasMore = false;
       }
     }
+  }
+
+  /// workspace.list(只读;M2 UI 的会话创建入口之一)。
+  Future<WorkspaceListValue> workspaceList() => api.call(
+        RpcMethods.workspaceList,
+        <String, dynamic>{},
+        parse: WorkspaceListValue.fromJson,
+      );
+
+  /// session.create:workspaceId 与 cwd 至多一个(服务端 refine,双侧都发必被拒)。
+  /// 创建后立刻 refresh 列表并把新会话登记进日志表。
+  Future<SessionCreateValue> createSession({String? workspaceId, String? cwd, String? agentPreset}) async {
+    final payload = <String, dynamic>{};
+    if (workspaceId != null) payload['workspaceId'] = workspaceId;
+    if (cwd != null) payload['cwd'] = cwd;
+    if (agentPreset != null) payload['agentPreset'] = agentPreset;
+    final value = await api.call(
+      RpcMethods.sessionCreate,
+      payload,
+      parse: SessionCreateValue.fromJson,
+    );
+    logFor(value.sessionId);
+    unawaited(refresh());
+    return value;
   }
 
   /// 发送纯文本 prompt(mode:queue)。

@@ -18,6 +18,18 @@ class FakeDshHost {
   final sessions = <String, List<Map<String, dynamic>>>{};
   final summaries = <Map<String, dynamic>>[];
   final promptRequests = <Map<String, dynamic>>[];
+  final createRequests = <Map<String, dynamic>>[];
+  int nextSessionNo = 1;
+  final workspaces = <Map<String, dynamic>>[
+    <String, dynamic>{
+      'workspaceId': 'ws-default',
+      'path': '/tmp/fake-workspace',
+      'title': 'fake workspace',
+      'sessionIds': <String>[],
+      'createdAt': '2026-08-14T00:00:00Z',
+      'updatedAt': '2026-08-14T00:00:00Z',
+    },
+  ];
 
   static Future<FakeDshHost> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -92,6 +104,53 @@ class FakeDshHost {
         'events': items,
         'hasMore': false,
       });
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/workspace.list') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      await _ok(req, envelope['rpcId'] as String, {
+        'items': workspaces,
+        'archivedSessionIds': <String>[],
+      });
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.create') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      createRequests.add(payload);
+      if (payload['workspaceId'] != null && payload['cwd'] != null) {
+        req.response.statusCode = 200;
+        req.response.headers.contentType = ContentType.json;
+        req.response.write(jsonEncode({
+          'type': 'server-response',
+          'rpcId': envelope['rpcId'],
+          'result': {
+            'ok': false,
+            'error': {
+              'code': 'bad-request',
+              'message': 'workspaceId or cwd, not both',
+              'details': {'issues': []},
+            },
+          },
+        }));
+        await req.response.close();
+        return;
+      }
+      final sessionId = 'session-fake-' + (nextSessionNo++).toString();
+      sessions[sessionId] = <Map<String, dynamic>>[];
+      summaries.add(<String, dynamic>{
+        'sessionId': sessionId,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        'running': false,
+        'blank': true,
+      });
+      for (final ws in workspaces) {
+        (ws['sessionIds'] as List<String>).add(sessionId);
+      }
+      await _ok(req, envelope['rpcId'] as String, {'sessionId': sessionId});
+      // 推 host 帧:新会话出现(客户端靠 refresh 拿到,不依赖此帧)。
       return;
     }
     if (req.method == 'POST' && path == '/api/session.prompt') {

@@ -160,6 +160,12 @@ class ConnectionController {
     Timer(backoff, _spawnGeneration);
   }
 
+  /// 测试钩子:模拟网络拔线 —— 主动关闭两条下行 socket(不通知服务端),
+  /// 触发与真实断网相同的整代重建路径。生产代码不得调用。
+  Future<void> debugDropDownlinks() async {
+    await _live?._dropSockets();
+  }
+
   Duration _nextBackoff() {
     if (_attempt > 20) _attempt = 20;
     final ms = _initialBackoff.inMilliseconds * pow(2, _attempt).toInt();
@@ -226,6 +232,16 @@ class _LiveGeneration {
     } on TypeError catch (e) {
       _errors.add(CarrierError('host frame shape: ' + e.toString()));
     }
+  }
+
+  /// 只关 socket、不动订阅:watchInvalidations 会照常触发代际翻转。
+  Future<void> _dropSockets() async {
+    final mux = _mux;
+    final host = _host;
+    _mux = null;
+    _host = null;
+    await mux?.close();
+    await host?.close();
   }
 
   Future<void> adoptAndTeardown(

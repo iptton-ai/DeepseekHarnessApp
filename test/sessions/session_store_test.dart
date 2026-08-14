@@ -100,6 +100,27 @@ void main() {
         <Map<String, dynamic>>[<String, dynamic>{'type': 'text', 'text': 'hello world'}]);
   });
 
+  test('workspaceList + createSession(round trip, list refresh)', () async {
+    controller.start();
+    store.start();
+    await store.summaries.first.timeout(const Duration(seconds: 3));
+
+    final wss = await store.workspaceList();
+    expect(wss.items, hasLength(1));
+    expect(wss.items.first.workspaceId, 'ws-default');
+    expect(wss.items.first.title, 'fake workspace');
+
+    final created = await store.createSession();
+    expect(created.sessionId, startsWith('session-fake-'));
+    expect(store.logFor(created.sessionId), isNotNull);
+    // createSession 触发 refresh(异步);轮询到 summaries 长出来。
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (store.currentSummaries.length < 2 && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    expect(store.currentSummaries, hasLength(2));
+  });
+
   test('generation flip: full refetch and no state loss', () async {
     controller.start();
     store.start();
