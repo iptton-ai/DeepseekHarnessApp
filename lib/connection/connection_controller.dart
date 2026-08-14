@@ -56,6 +56,7 @@ class ConnectionController {
   final _muxFrames = StreamController<MuxFrame>.broadcast();
   final _hostFrames = StreamController<HostFrame>.broadcast();
   final _protocolErrors = StreamController<Object>.broadcast();
+  final _addressedMux = StreamController<AddressedMuxFrame>.broadcast();
 
   int _generation = 0;
   int _attempt = 0;
@@ -74,6 +75,10 @@ class ConnectionController {
 
   /// 协议级畸形帧上报(不杀连接)。
   Stream<Object> get protocolErrors => _protocolErrors.stream;
+
+  /// 可应答帧(rpcId 来自信封,payload 为 MuxFrame):审批/问答 UI 的数据源。
+  /// 非可应答 mux 帧也会出现(推送帧 rpcId 仍回显,应答它们只会 not-pending)。
+  Stream<AddressedMuxFrame> get addressedMuxFrames => _addressedMux.stream;
 
   ConnectionSnapshot? get current => _current;
   ConnectionSnapshot? _current;
@@ -95,6 +100,7 @@ class ConnectionController {
     await _muxFrames.close();
     await _hostFrames.close();
     await _protocolErrors.close();
+    await _addressedMux.close();
     apiClient.dispose();
   }
 
@@ -108,7 +114,7 @@ class ConnectionController {
     _generation += 1;
     final gen = _generation;
     _emit(ConnectionSnapshot(generation: gen, phase: ConnectionPhase.connecting));
-    final live = _LiveGeneration(gen, _muxFrames, _hostFrames, _protocolErrors);
+    final live = _LiveGeneration(gen, _muxFrames, _hostFrames, _protocolErrors, _addressedMux);
     _live = live;
 
     final describeFuture = apiClient.call(
@@ -175,14 +181,22 @@ class ConnectionController {
   }
 }
 
+/// 带 rpcId 的 mux 帧(rpcId 在信封层,payload 变体里没有)。
+class AddressedMuxFrame {
+  const AddressedMuxFrame({required this.rpcId, required this.frame});
+  final String rpcId;
+  final MuxFrame frame;
+}
+
 /// 一次代际的活体资源:两条 socket + 帧订阅。
 class _LiveGeneration {
-  _LiveGeneration(this.generation, this._muxSink, this._hostSink, this._errors);
+  _LiveGeneration(this.generation, this._muxSink, this._hostSink, this._errors, this._addressedSink);
 
   final int generation;
   final StreamController<MuxFrame> _muxSink;
   final StreamController<HostFrame> _hostSink;
   final StreamController<Object> _errors;
+  final StreamController<AddressedMuxFrame> _addressedSink;
   static const _parser = DownlinkParser();
 
   Downlink? _mux;
@@ -211,10 +225,13 @@ class _LiveGeneration {
   }
 
   void _onMuxRaw(Map<String, dynamic> raw) {
+    final rpcId = raw['rpcId'] is String ? raw['rpcId'] as String : '';
     final payload = _parser.parseEnvelope(raw, _errors.add);
     if (payload == null) return;
     try {
-      if (!_muxSink.isClosed) _muxSink.add(MuxFrame.fromJson(payload));
+      final frame = MuxFrame.fromJson(payload);
+      if (!_muxSink.isClosed) _muxSink.add(frame);
+      if (!_addressedSink.isClosed) _addressedSink.add(AddressedMuxFrame(rpcId: rpcId, frame: frame));
     } on FormatException catch (e) {
       _errors.add(CarrierError('mux frame parse: ' + e.message));
     } on TypeError catch (e) {

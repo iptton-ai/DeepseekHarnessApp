@@ -148,6 +148,35 @@ class ApiClient {
     throw RpcBusinessError(RpcError.fromJson(errorJson));
   }
 
+  /// POST /api/respond —— 响应体不是 server-response,而是回执 JSON
+  /// ({accepted} | {accepted:false, reason});信封是 client-response。
+  Future<Map<String, dynamic>> postRespond(Map<String, dynamic> clientResponseEnvelope) async {
+    final uri = _baseUri.replace(path: '/api/respond');
+    final HttpClientRequest req;
+    try {
+      req = await _httpClient.postUrl(uri);
+    } on SocketException catch (e) {
+      throw CarrierError('connect refused: ' + e.message);
+    }
+    req.headers.contentType = ContentType.json;
+    req.write(jsonEncode(clientResponseEnvelope));
+    final res = await req.close();
+    final body = await res.transform(utf8.decoder).join();
+    if (res.statusCode != 200) {
+      throw CarrierError('http ' + res.statusCode.toString(), httpStatus: res.statusCode);
+    }
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException catch (e) {
+      throw CarrierError('non-json receipt: ' + e.message);
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw CarrierError('receipt not an object');
+    }
+    return decoded;
+  }
+
   /// UUIDv4;rpcId 只由发起方 mint,响应只校验回显。
   String _mintRpcId() {
     final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
