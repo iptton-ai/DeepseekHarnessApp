@@ -1,30 +1,32 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// 冒烟:app 入口组装(SinglemanApp + ChatScreen)可构建。
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:singleman/main.dart';
+import 'package:singleman/sessions/session_store.dart';
+import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/wire/generated/wire_generated.dart';
+
+class _EmptyView implements SessionStoreView {
+  @override
+  Stream<List<SessionSummary>> get summaries => const Stream.empty();
+  @override
+  List<SessionSummary> get currentSummaries => const <SessionSummary>[];
+  @override
+  SessionLog logFor(String sessionId) => SessionLog(sessionId);
+}
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
-
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('SinglemanApp builds with empty state', (tester) async {
+    final vm = ChatViewModel(store: _EmptyView(), connection: null);
+    await tester.pumpWidget(SinglemanApp(
+      vm: vm,
+      onNewSession: () async {},
+      sender: (id, text) async {},
+    ));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('选择或创建一个会话开始对话'), findsOneWidget);
+    vm.dispose();
   });
 }
