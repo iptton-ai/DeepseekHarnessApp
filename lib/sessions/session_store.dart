@@ -9,6 +9,7 @@
 //
 // 上层(UI)只消费广播流,不碰 wire。
 import 'dart:async';
+import 'dart:io';
 
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
@@ -208,6 +209,86 @@ class SessionStore implements SessionStoreView {
     logFor(value.sessionId);
     unawaited(refresh());
     return value;
+  }
+
+  /// session.models:目录 + 当前选择 + routable(prompt 前不可路由 → model-unavailable)。
+  Future<SessionModelsValue> sessionModels(String sessionId) => api.call(
+        RpcMethods.sessionModels,
+        <String, dynamic>{'sessionId': sessionId},
+        parse: SessionModelsValue.fromJson,
+      );
+
+  /// session.selectModel:选择可与目录成员无关(服务端语义)。
+  Future<SessionSelectModelValue> selectModel(
+    String sessionId, {
+    required String provider,
+    required String model,
+    String? reasoningEffort,
+  }) =>
+      api.call(
+        RpcMethods.sessionSelectModel,
+        <String, dynamic>{
+          'sessionId': sessionId,
+          'provider': provider,
+          'model': model,
+          if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
+        },
+        parse: SessionSelectModelValue.fromJson,
+      );
+
+  /// session.search:侧栏搜索(query ≤500 字符,分页 hasMore)。
+  Future<SessionSearchValue> sessionSearch(String query) => api.call(
+        RpcMethods.sessionSearch,
+        <String, dynamic>{'query': query},
+        parse: SessionSearchValue.fromJson,
+      );
+
+  /// session.fork:atSeq 锚点须映射到已闭合 turn(turn 未闭合 → fork-unavailable)。
+  /// fork 后 refresh(新会话入列)。
+  Future<SessionForkValue> forkSession(String sessionId, {int? atSeq}) async {
+    final value = await api.call(
+      RpcMethods.sessionFork,
+      <String, dynamic>{
+        'sessionId': sessionId,
+        if (atSeq != null) 'atSeq': atSeq,
+      },
+      parse: SessionForkValue.fromJson,
+    );
+    logFor(value.sessionId);
+    unawaited(refresh().catchError((Object _) {}));
+    return value;
+  }
+
+  /// session.rename:响应回带的规范化 title+seq 先落本地格,
+  /// 推送 session/projection 帧高 seq 覆盖(乱序安全,见 DSH-PROTOCOL §5)。
+  Future<SessionRenameValue> renameSession(String sessionId, String title) async {
+    final value = await api.call(
+      RpcMethods.sessionRename,
+      <String, dynamic>{'sessionId': sessionId, 'title': title},
+      parse: SessionRenameValue.fromJson,
+    );
+    final log = _logs[sessionId];
+    log?.applyProjection('title', <String, dynamic>{'title': value.title}, value.seq);
+    unawaited(refresh().catchError((Object _) {}));
+    return value;
+  }
+
+  /// 会话导出:GET /api/session.export 流式 ZIP(非 RPC 面)到本地文件。
+  Future<void> exportSessionZip(String sessionId, String filePath,
+      {bool includeDescendants = true}) async {
+    final sink = File(filePath).openWrite();
+    try {
+      await api.download(
+        '/api/session.export',
+        queryParameters: <String, String>{
+          'sessionId': sessionId,
+          'includeDescendants': includeDescendants.toString(),
+        },
+        consume: (c) async => sink.add(c),
+      );
+    } finally {
+      await sink.close();
+    }
   }
 
   /// 发送纯文本 prompt(mode:queue)。

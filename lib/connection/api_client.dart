@@ -177,6 +177,29 @@ class ApiClient {
     return decoded;
   }
 
+  /// GET 下载面(非 RPC):流式响应逐块写给 [consume]。
+  /// session.export ZIP 走这里;HTTP 非 200 折叠为 CarrierError。
+  Future<void> download(
+    String path, {
+    Map<String, String> queryParameters = const {},
+    required Future<void> Function(List<int> chunk) consume,
+  }) async {
+    final uri = _baseUri.replace(path: path, queryParameters: queryParameters);
+    final HttpClientRequest req;
+    try {
+      req = await _httpClient.getUrl(uri);
+    } on SocketException catch (e) {
+      throw CarrierError('connect refused: ' + e.message);
+    }
+    final res = await req.close();
+    if (res.statusCode != 200) {
+      throw CarrierError('http ' + res.statusCode.toString(), httpStatus: res.statusCode);
+    }
+    await for (final chunk in res) {
+      await consume(chunk);
+    }
+  }
+
   /// UUIDv4;rpcId 只由发起方 mint,响应只校验回显。
   String _mintRpcId() {
     final bytes = List<int>.generate(16, (_) => _random.nextInt(256));

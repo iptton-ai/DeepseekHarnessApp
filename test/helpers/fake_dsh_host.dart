@@ -236,6 +236,108 @@ class FakeDshHost {
       await _ok(req, envelope['rpcId'] as String, {'accepted': true});
       return;
     }
+    if (req.method == 'POST' && path == '/api/session.models') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      await _ok(req, envelope['rpcId'] as String, {
+        'current': {'provider': 'fake', 'model': 'fake-model'},
+        'routable': true,
+        'groups': [
+          {
+            'id': 'fake',
+            'name': 'Fake Provider',
+            'models': [
+              {
+                'id': 'fake-model',
+                'name': 'Fake Model',
+                'reasoning': {
+                  'efforts': [
+                    {'id': 'low', 'name': 'Low'},
+                    {'id': 'high', 'name': 'High'},
+                  ],
+                  'defaultEffort': 'high',
+                },
+              },
+              {'id': 'fake-mini', 'name': 'Fake Mini'},
+            ],
+          },
+        ],
+        'failures': <Map<String, dynamic>>[],
+      });
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.selectModel') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final selected = <String, dynamic>{
+        'provider': payload['provider'],
+        'model': payload['model'],
+      };
+      if (payload['reasoningEffort'] is String) {
+        selected['reasoningEffort'] = payload['reasoningEffort'];
+      }
+      await _ok(req, envelope['rpcId'] as String, {'selected': selected});
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.search') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final query = payload['query'] as String;
+      final items = <Map<String, dynamic>>[
+        for (final s in summaries)
+          if ((s['cwd'] as String? ?? '').contains(query))
+            {'sessionId': s['sessionId'], 'snippet': 'matched ' + query},
+      ];
+      await _ok(req, envelope['rpcId'] as String,
+          {'items': items, 'hasMore': false});
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.fork') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final src = payload['sessionId'] as String;
+      if (!(sessions.containsKey(src))) {
+        await _bizError(req, envelope['rpcId'] as String, 'session-not-found',
+            {'sessionId': src});
+        return;
+      }
+      final forkId = 'session-fake-fork-' + (nextSessionNo++).toString();
+      sessions[forkId] = List<Map<String, dynamic>>.of(sessions[src] ?? <Map<String, dynamic>>[]);
+      summaries.add(<String, dynamic>{
+        'sessionId': forkId,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        'running': false,
+        'blank': false,
+        'cwd': '/tmp/fake',
+      });
+      await _ok(req, envelope['rpcId'] as String, {'sessionId': forkId});
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.rename') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final title = (payload['title'] as String).trim();
+      if (title.isEmpty) {
+        await _bizError(req, envelope['rpcId'] as String, 'title-invalid',
+            {'sessionId': payload['sessionId']});
+        return;
+      }
+      await _ok(req, envelope['rpcId'] as String, {'title': title, 'seq': 999});
+      return;
+    }
+    if (req.method == 'GET' && path == '/api/session.export') {
+      // 最小合法 ZIP(空档案的 22 字节 EOCD)。
+      final zip = <int>[0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      req.response.statusCode = 200;
+      req.response.headers.contentType = ContentType.binary;
+      req.response.add(zip);
+      await req.response.close();
+      return;
+    }
     if (path == '/api/events.mux' || path == '/api/events.host') {
       final ws = await WebSocketTransformer.upgrade(req);
       sockets.add(ws);
