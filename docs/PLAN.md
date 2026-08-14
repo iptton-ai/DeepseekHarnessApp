@@ -40,10 +40,11 @@
 - [x] 接口冻结,写包 README(lib/connection/README.md)
 - **验收**:拔线/杀主机/超时三类故障注入下状态机收敛 ✅(test/connection 11 绿,假主机 test/helpers/fake_dsh_host.dart)
 
-### M2 最小聊天环(可演示)
-- [ ] `workspace.list` + `session.create/list` + `session.prompt` + `session.history`(含 projections 尾页)
-- [ ] 纯文本/markdown 渲染会话流(session/event 增量)
-- **验收**:桌面 app 里完成一次真实对话,断网重连不丢状态
+### M2 最小聊天环(可演示)✅ 2026-08-14 完成
+- [x] `workspace.list` + `session.create/list` + `session.prompt` + `session.history`(含 projections 尾页)
+- [x] 纯文本渲染会话流(session/event 增量;markdown 归 M4)
+- [x] 最小 UI:会话侧栏 + 消息气泡 + 输入框 + 连接状态徽章
+- **验收** ✅:`bin/live_chat_smoke.dart` 对活体 3080 真实对话(ASSISTANT: SMOKE OK FROM DSH)+ 拔线重连(gen 1→2,101 事件不丢)+ macOS debug 构建通过;`flutter test` 24/24 绿
 
 ### M3 交互帧
 - [ ] `approval/requested` → `POST /api/respond` 审批卡(allow/deny)
