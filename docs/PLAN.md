@@ -52,8 +52,15 @@
 - [x] `session/queue` 队列 Dock + `session.updateQueue` 删除(splice+queue-item-not-found 折叠)+ `session.cancel`
 - **验收** ✅:假主机 fault 注入 7 用例 + 活体 queue fixture 回放 1 用例全绿;32/32
 
-### M4+ 并行功能面(fan-out,每个特性独立上下文)
-按需并行,每特性一个任务包:图片附件上传(含限额本地预拒)、模型选择器(`session.models/selectModel`)、会话 fork/导出(ZIP 下载)、session.search、workspace 管理、goal 面板、skill 菜单(`/name` 即普通 prompt,无需专线上)、手机 LAN 形态(trusted-host 引导页 + 隐藏特权面)。
+### M4+ 并行功能面 ✅ 2026-08-14 完成
+- [x] 图片附件上传(含限额本地预拒:四限+媒体类型枚举+纯头部尺寸探测)
+- [x] 模型选择器(`session.models/selectModel`,reasoningEffort+routable 警示)
+- [x] 会话 fork/导出(ZIP 流式下载)
+- [x] session.search(域方法+侧栏过滤)
+- [x] goal 面板(六方法域层 + GoalPanel UI)
+- [x] skill 菜单(`/name` 即普通 prompt,SkillCatalog+底部弹层)
+- [x] 手机 LAN 形态(连接配置页 + PrivilegeScope 按 loopback 隐藏特权面;真机验证待做)
+- workspace 管理:暂缓(桌面会话列表已覆盖主场景,按需再开)
 
 ## 任务模板(五件套)
 
