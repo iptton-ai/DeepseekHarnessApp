@@ -17,11 +17,13 @@ class SessionActions {
     this.onRename,
     this.onFork,
     this.onExport,
+    this.onPickSkill,
   });
   final VoidCallback? onPickModel;
   final void Function(String sessionId, String title)? onRename;
   final void Function(String sessionId)? onFork;
   final void Function(String sessionId)? onExport;
+  final void Function(String skillName)? onPickSkill;
 }
 
 class ChatScreen extends StatelessWidget {
@@ -124,6 +126,12 @@ class _SidebarState extends State<_Sidebar> {
                       tooltip: '选择模型',
                       onPressed: widget.actions!.onPickModel,
                       icon: const Icon(Icons.tune),
+                    ),
+                  if (widget.actions?.onPickSkill != null)
+                    IconButton(
+                      tooltip: '技能',
+                      onPressed: () => widget.actions!.onPickSkill?.call(''),
+                      icon: const Icon(Icons.bolt),
                     ),
                   IconButton(
                     tooltip: '新建会话',

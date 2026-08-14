@@ -6,10 +6,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/sessions/goal_store.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/ui/chat_screen.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/goal_skill_widgets.dart';
 import 'package:singleman/ui/model_picker.dart';
 
 const kDefaultBase = 'http://127.0.0.1:3080';
@@ -24,6 +26,8 @@ Future<void> main() async {
   final connection = ConnectionController(baseUri: base);
   final store = SessionStore(api: api, connection: connection);
   final interactor = InteractorStore(api: api, connection: connection);
+  final goals = GoalStore(api: api);
+  final skills = SkillCatalog(api: api);
 
   connection.start();
   store.start();
@@ -77,6 +81,19 @@ Future<void> main() async {
           debugPrint('exported to ' + path);
         } on Object catch (e) {
           debugPrint('export failed: ' + e.toString());
+        }
+      },
+      onPickSkill: (_) async {
+        final ctx = navigatorKey.currentContext;
+        if (ctx == null) return;
+        final name = await showSkillSheet(ctx, load: skills.list);
+        if (name == null) return;
+        final sid = vm.selectedId;
+        if (sid == null) return;
+        try {
+          await store.promptText(sid, skills.promptFor(name), clientTimeZone: 'UTC');
+        } on Object catch (e) {
+          debugPrint('skill prompt failed: ' + e.toString());
         }
       },
     ),
