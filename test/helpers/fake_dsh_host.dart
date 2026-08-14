@@ -109,6 +109,18 @@ class FakeDshHost {
       await _ok(req, envelope['rpcId'] as String, {
         'events': items,
         'hasMore': false,
+        'projections': {
+          'asOfSeq': items.isEmpty ? -1 : (items.last['event'] as Map)['seq'] as int,
+          'values': {
+            'imageLimits': {
+              'maxImageBytes': 10 * 1024 * 1024,
+              'maxImagesPerMessage': 4,
+              'maxMessageImageBytes': 40 * 1024 * 1024,
+              'maxImagePixels': 8000 * 8000,
+              'mediaTypes': ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+            },
+          },
+        },
       });
       return;
     }

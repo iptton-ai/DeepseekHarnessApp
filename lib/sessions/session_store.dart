@@ -12,6 +12,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:singleman/connection/api_client.dart';
+import 'package:singleman/sessions/attachments.dart';
 import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
@@ -289,6 +290,43 @@ class SessionStore implements SessionStoreView {
     } finally {
       await sink.close();
     }
+  }
+
+  /// 从投影水位取 imageLimits(未装载历史时为 null —— 预拒退化为服务端权威)。
+  AttachmentLimits? attachmentLimitsFor(String sessionId) {
+    final values = _logs[sessionId]?.projections;
+    if (values == null) return null;
+    final raw = values['imageLimits'];
+    if (raw is! Map<String, dynamic>) return null;
+    return AttachmentLimits.fromProjection(raw);
+  }
+
+  /// 带图 prompt:本地预拒(imageLimits 缺失时跳过预检,服务端权威)。
+  Future<SessionPromptValue> promptWithImages(
+    String sessionId,
+    String text,
+    List<PendingImage> images, {
+    String mode = 'queue',
+    String? clientTimeZone,
+  }) async {
+    final limits = attachmentLimitsFor(sessionId);
+    if (limits != null) {
+      final err = validateImages(images, limits);
+      if (err != null) {
+        throw ArgumentError('图片被本地预拒: ' + err);
+      }
+    }
+    final request = <String, dynamic>{
+      'sessionId': sessionId,
+      'mode': mode,
+      'content': buildPromptContent(text, images),
+    };
+    if (clientTimeZone != null) request['clientTimeZone'] = clientTimeZone;
+    return api.call(
+      RpcMethods.sessionPrompt,
+      request,
+      parse: SessionPromptValue.fromJson,
+    );
   }
 
   /// 发送纯文本 prompt(mode:queue)。
