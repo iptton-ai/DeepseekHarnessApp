@@ -11,9 +11,13 @@ class FakeDshHost {
   final hostSockets = <WebSocket>[];
 
   int describeCalls = 0;
+  int listCalls = 0;
   bool hangDescribe = false;
   bool wrongRpcIdEcho = false;
   bool businessError = false;
+  final sessions = <String, List<Map<String, dynamic>>>{};
+  final summaries = <Map<String, dynamic>>[];
+  final promptRequests = <Map<String, dynamic>>[];
 
   static Future<FakeDshHost> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -68,6 +72,35 @@ class FakeDshHost {
       await req.response.close();
       return;
     }
+    if (req.method == 'POST' && path == '/api/session.list') {
+      listCalls += 1;
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      await _ok(req, envelope['rpcId'] as String, {'items': summaries});
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.history') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final sessionId = payload['sessionId'] as String;
+      final events = sessions[sessionId] ?? <Map<String, dynamic>>[];
+      final items = events
+          .map((e) => <String, dynamic>{'event': e})
+          .toList(growable: false);
+      await _ok(req, envelope['rpcId'] as String, {
+        'events': items,
+        'hasMore': false,
+      });
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/session.prompt') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      promptRequests.add(envelope['payload'] as Map<String, dynamic>);
+      await _ok(req, envelope['rpcId'] as String, {'accepted': true});
+      return;
+    }
     if (path == '/api/events.mux' || path == '/api/events.host') {
       final ws = await WebSocketTransformer.upgrade(req);
       sockets.add(ws);
@@ -78,6 +111,27 @@ class FakeDshHost {
     req.response.statusCode = 404;
     req.response.write('not found');
     await req.response.close();
+  }
+
+  Future<void> _ok(HttpRequest req, String rpcId, Map<String, dynamic> value) async {
+    req.response.statusCode = 200;
+    req.response.headers.contentType = ContentType.json;
+    req.response.write(jsonEncode({
+      'type': 'server-response',
+      'rpcId': rpcId,
+      'result': {'ok': true, 'value': value},
+    }));
+    await req.response.close();
+  }
+
+  /// 往某会话追加事件并推 mux session/event 帧。
+  void pushSessionEvent(String sessionId, Map<String, dynamic> event) {
+    sessions.putIfAbsent(sessionId, () => <Map<String, dynamic>>[]).add(event);
+    sendMuxFrame({
+      'type': 'session/event',
+      'sessionId': sessionId,
+      'event': event,
+    });
   }
 
   /// 从 mux 流发一帧(server-request 信封)。
