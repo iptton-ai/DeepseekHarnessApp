@@ -8,6 +8,7 @@ DSH 是插件化 agent harness,本机以 `dsh` CLI 运行,Web GUI 即其官方�
 | 阶段 | 状态 |
 |---|---|
 | 可行性评估 | ✅ 完成 — **结论:可行** |
+| **活体全链路验收** | ✅ **FEATURES-SMOKE-PASS**(2026-08-14)— 真实对话/fork/模型切换/导出 |
 | 开发计划 | ✅ 完成 — 见 `docs/PLAN.md` |
 | 协议知识冻结 | ✅ 完成 — 见 `docs/DSH-PROTOCOL.md` |
 | M0 契约与测试床 | ✅ 完成(2026-08-14)— codegen 管线 + conformance 3 绿 + fixture 回放 2 绿 |
