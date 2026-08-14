@@ -338,6 +338,43 @@ class FakeDshHost {
       await req.response.close();
       return;
     }
+    if (req.method == 'POST' && (path == '/api/goal.create' || path == '/api/goal.edit' || path == '/api/goal.pause' || path == '/api/goal.resume' || path == '/api/goal.complete')) {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      final payload = envelope['payload'] as Map<String, dynamic>;
+      final id = (payload['goalId'] as String?) ?? 'goal-1';
+      final rev = payload['revision'] as int? ?? 0;
+      await _ok(req, envelope['rpcId'] as String, {
+        'ref': {'id': id, 'revision': rev + 1},
+      });
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/goal.clear') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      await _ok(req, envelope['rpcId'] as String, {'cleared': true});
+      return;
+    }
+    if (req.method == 'POST' && path == '/api/skill.list') {
+      final body = await utf8.decoder.bind(req).join();
+      final envelope = jsonDecode(body) as Map<String, dynamic>;
+      await _ok(req, envelope['rpcId'] as String, {
+        'skills': [
+          {
+            'name': 'deploy',
+            'description': '部署到目标环境',
+            'whenToUse': '当用户要求部署时',
+            'modelInvocable': true,
+          },
+          {
+            'name': 'docs',
+            'description': '生成文档',
+            'modelInvocable': false,
+          },
+        ],
+      });
+      return;
+    }
     if (path == '/api/events.mux' || path == '/api/events.host') {
       final ws = await WebSocketTransformer.upgrade(req);
       sockets.add(ws);
