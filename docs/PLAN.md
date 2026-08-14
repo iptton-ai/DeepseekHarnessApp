@@ -46,11 +46,11 @@
 - [x] 最小 UI:会话侧栏 + 消息气泡 + 输入框 + 连接状态徽章
 - **验收** ✅:`bin/live_chat_smoke.dart` 对活体 3080 真实对话(ASSISTANT: SMOKE OK FROM DSH)+ 拔线重连(gen 1→2,101 事件不丢)+ macOS debug 构建通过;`flutter test` 24/24 绿
 
-### M3 交互帧
-- [ ] `approval/requested` → `POST /api/respond` 审批卡(allow/deny)
-- [ ] `question/requested` 结构化问答表单(**注意服务端严格校验**,bad-response 规则见 DSH-PROTOCOL §5,靠 fixture 兜)
-- [ ] `session/queue` 队列 Dock + `session.updateQueue` 编辑/删除 + `session.cancel`
-- **验收**:fault 注入 + fixture 回放全绿
+### M3 交互帧 ✅ 2026-08-14 完成
+- [x] `approval/requested` → `POST /api/respond` 审批卡(允许一次/拒绝;client-response 信封 rpcId 回显信封层)
+- [x] `question/requested` 结构化问答表单(本地预校验:漏答/未知 label/单选互斥/重复 id;服务端权威)
+- [x] `session/queue` 队列 Dock + `session.updateQueue` 删除(splice+queue-item-not-found 折叠)+ `session.cancel`
+- **验收** ✅:假主机 fault 注入 7 用例 + 活体 queue fixture 回放 1 用例全绿;32/32
 
 ### M4+ 并行功能面(fan-out,每个特性独立上下文)
 按需并行,每特性一个任务包:图片附件上传(含限额本地预拒)、模型选择器(`session.models/selectModel`)、会话 fork/导出(ZIP 下载)、session.search、workspace 管理、goal 面板、skill 菜单(`/name` 即普通 prompt,无需专线上)、手机 LAN 形态(trusted-host 引导页 + 隐藏特权面)。
