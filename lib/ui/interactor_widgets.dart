@@ -1,61 +1,144 @@
 // M3 交互卡片:审批卡、问答表单、队列 Dock。
 // 纪律:question 表单的 label 选择严格来自帧的 options(精确字符串回传),
 // 批次完整性由 InteractorStore.validateQuestionAnswers 预校验兜底。
+// 刷新安全(硬性):卡片以 rpcId 稳定 key 挂载 —— 列表增删/父级重建
+// 不会丢失已选选项与已输入文本;种子态来自 store.current* 快照,
+// 错过流事件的渲染也能自愈(重连重放场景)。
 import 'package:flutter/material.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 审批卡:列出待审批,allow/deny 二键。
+/// [sessionLabel] 非空时显示归属会话徽标(多会话并行的审批面)。
 class ApprovalCards extends StatelessWidget {
   const ApprovalCards({
     super.key,
     required this.approvals,
     required this.onRespond,
+    this.sessionLabel,
   });
   final List<PendingApproval> approvals;
   final void Function(PendingApproval approval, bool allow) onRespond;
 
+  /// rpcId → 会话短标签(归属非当前会话时展示;空表 = 当前会话)。
+  final Map<String, String>? sessionLabel;
+
   @override
   Widget build(BuildContext context) {
     if (approvals.isEmpty) return const SizedBox.shrink();
+    final colors = Theme.of(context).colorScheme;
     return Column(
       children: [
         for (final a in approvals)
-          Card(
+          Container(
+            key: ValueKey('approval-${a.rpcId}'),
             margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            color: Theme.of(context).colorScheme.tertiaryContainer,
+            decoration: BoxDecoration(
+              color: colors.tertiaryContainer.withValues(alpha: .9),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: colors.tertiary.withValues(alpha: .45)),
+            ),
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(14),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(children: [
-                    const Icon(Icons.gavel, size: 16),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        '审批请求:' + a.toolName + (a.callId != null ? ' (' + a.callId! + ')' : ''),
-                        style: const TextStyle(fontWeight: FontWeight.w600),
+                  Row(
+                    children: [
+                      Container(
+                        width: 30,
+                        height: 30,
+                        decoration: BoxDecoration(
+                          color: colors.tertiary.withValues(alpha: .16),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.gavel_outlined,
+                          size: 17,
+                          color: colors.tertiary,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '审批请求',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: colors.onTertiaryContainer.withValues(alpha: .8),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              a.toolName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_labelOf(a) != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: colors.surface.withValues(alpha: .6),
+                            borderRadius: BorderRadius.circular(9),
+                          ),
+                          child: Text(
+                            _labelOf(a)!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (a.reason != null && a.reason!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: colors.surface.withValues(alpha: .5),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          a.reason!,
+                          style: const TextStyle(fontSize: 12.5, height: 1.4),
+                        ),
                       ),
                     ),
-                  ]),
-                  if (a.reason != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(a.reason!, style: const TextStyle(fontSize: 12)),
-                    ),
-                  const SizedBox(height: 8),
-                  Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-                    OutlinedButton(
-                      onPressed: () => onRespond(a, false),
-                      child: const Text('拒绝'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      onPressed: () => onRespond(a, true),
-                      child: const Text('允许一次'),
-                    ),
-                  ]),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Spacer(),
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(88, 44),
+                        ),
+                        onPressed: () => onRespond(a, false),
+                        child: const Text('拒绝'),
+                      ),
+                      const SizedBox(width: 10),
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(104, 44),
+                        ),
+                        onPressed: () => onRespond(a, true),
+                        icon: const Icon(Icons.check, size: 16),
+                        label: const Text('允许一次'),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -63,20 +146,34 @@ class ApprovalCards extends StatelessWidget {
       ],
     );
   }
+
+  String? _labelOf(PendingApproval a) {
+    final label = sessionLabel?[a.rpcId];
+    if (label == null || label.isEmpty) return null;
+    return label;
+  }
 }
 
 /// 问答表单:批次内每题渲染(header/question/detail/options/multiSelect);
-/// 提交前走预校验;custom 文本框只在有 options 的题出现(multiSelect 语义)。
+/// 提交前走预校验,校验失败内联显示(不清空已填内容);
+/// custom 文本框只在 multiSelect 题出现(协议语义:custom 仅多选题可带)。
+/// onSubmitted 异步回执:not-pending / bad-response 内联提示。
 class QuestionForm extends StatefulWidget {
   const QuestionForm({
     super.key,
     required this.question,
     required this.onSubmit,
     this.onDismiss,
+    this.sessionLabel,
   });
   final PendingQuestion question;
-  final void Function(List<QuestionAnswerDraft> drafts) onSubmit;
+
+  /// 提交:返回 null = 通过(帧已被主机收走);否则为回执错误文案。
+  final Future<String?> Function(List<QuestionAnswerDraft> drafts) onSubmit;
   final VoidCallback? onDismiss;
+
+  /// 归属会话短标签(跨会话问题时显示;null = 当前会话)。
+  final String? sessionLabel;
 
   @override
   State<QuestionForm> createState() => _QuestionFormState();
@@ -85,6 +182,8 @@ class QuestionForm extends StatefulWidget {
 class _QuestionFormState extends State<QuestionForm> {
   final _selections = <String, Set<String>>{};
   final _customs = <String, TextEditingController>{};
+  String? _error;
+  bool _submitting = false;
 
   @override
   void dispose() {
@@ -94,80 +193,9 @@ class _QuestionFormState extends State<QuestionForm> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final qs = widget.question.questions;
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Row(children: [
-              Icon(Icons.help_outline, size: 16),
-              SizedBox(width: 6),
-              Text('代理提问', style: TextStyle(fontWeight: FontWeight.w600)),
-            ]),
-            for (final q in qs) ..._questionBlock(q),
-            const SizedBox(height: 8),
-            Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-              if (widget.onDismiss != null)
-                TextButton(onPressed: widget.onDismiss, child: const Text('稍后')),
-              const SizedBox(width: 8),
-              FilledButton(onPressed: _submit, child: const Text('提交')),
-            ]),
-          ],
-        ),
-      ),
-    );
-  }
-
-  List<Widget> _questionBlock(AskUserQuestionItem q) {
-    final multi = q.multiSelect == true;
-    final options = q.options ?? const <Map<String, dynamic>>[];
-    return [
-      const SizedBox(height: 10),
-      if (q.header != null)
-        Text(q.header!, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-      Text(q.question!, style: const TextStyle(fontSize: 13)),
-      if (q.detail != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Text(q.detail!, style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
-        ),
-      for (final o in options)
-        _optionTile(q, o, multi),
-    ];
-  }
-
-  Widget _optionTile(AskUserQuestionItem q, Map<String, dynamic> option, bool multi) {
-    final label = option['label'] as String;
-    final desc = option['description'] as String?;
-    final selected = _selections[q.id]?.contains(label) ?? false;
-    return CheckboxListTile(
-      dense: true,
-      controlAffinity: ListTileControlAffinity.leading,
-      value: selected,
-      title: Text(label),
-      subtitle: desc != null ? Text(desc, style: const TextStyle(fontSize: 12)) : null,
-      onChanged: (v) {
-        setState(() {
-          final set = _selections.putIfAbsent(q.id, () => <String>{});
-          if (multi) {
-            v == true ? set.add(label) : set.remove(label);
-          } else {
-            set
-              ..clear()
-              ..add(label);
-            _customs.remove(q.id)?.dispose();
-          }
-        });
-      },
-    );
-  }
-
-  void _submit() {
+  Future<void> _submit() async {
+    if (_submitting) return;
+    setState(() => _error = null);
     final drafts = <QuestionAnswerDraft>[];
     for (final q in widget.question.questions) {
       final sel = (_selections[q.id] ?? const <String>{}).toList();
@@ -175,7 +203,263 @@ class _QuestionFormState extends State<QuestionForm> {
       final custom = controller == null ? null : controller.text;
       drafts.add(QuestionAnswerDraft(questionId: q.id, selected: sel, custom: custom));
     }
-    widget.onSubmit(drafts);
+    setState(() => _submitting = true);
+    try {
+      final err = await widget.onSubmit(drafts);
+      if (mounted && err != null) setState(() => _error = err);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final qs = widget.question.questions;
+    return Container(
+      key: ValueKey('question-${widget.question.rpcId}'),
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      decoration: BoxDecoration(
+        color: colors.secondaryContainer.withValues(alpha: .55),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: colors.secondary.withValues(alpha: .5)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: colors.secondary.withValues(alpha: .16),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.contact_support_outlined,
+                    size: 17,
+                    color: colors.secondary,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text('代理提问', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+                ),
+                if (widget.sessionLabel != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: colors.surface.withValues(alpha: .6),
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: Text(
+                      widget.sessionLabel!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            for (final q in qs) ..._questionBlock(q, colors),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: colors.errorContainer.withValues(alpha: .55),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(fontSize: 12, color: colors.error),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (widget.onDismiss != null)
+                  TextButton(onPressed: widget.onDismiss, child: const Text('稍后')),
+                const SizedBox(width: 8),
+                FilledButton(
+                  style: FilledButton.styleFrom(minimumSize: const Size(88, 44)),
+                  onPressed: _submitting ? null : _submit,
+                  child: _submitting
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('提交'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _questionBlock(AskUserQuestionItem q, ColorScheme colors) {
+    final multi = q.multiSelect == true;
+    final options = q.options ?? const <Map<String, dynamic>>[];
+    return [
+      const SizedBox(height: 12),
+      if (q.header != null)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: colors.secondary.withValues(alpha: .14),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            q.header!,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+          ),
+        ),
+      const SizedBox(height: 6),
+      Text(
+        q.question,
+        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, height: 1.4),
+      ),
+      if (q.detail != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: Text(
+            q.detail!,
+            style: TextStyle(fontSize: 12, height: 1.4, color: colors.onSurfaceVariant),
+          ),
+        ),
+      const SizedBox(height: 4),
+      for (final o in options) _optionTile(q, o, multi, colors),
+      if (multi) ..._customField(q, colors),
+    ];
+  }
+
+  Widget _optionTile(
+    AskUserQuestionItem q,
+    Map<String, dynamic> option,
+    bool multi,
+    ColorScheme colors,
+  ) {
+    final label = option['label'] as String;
+    final desc = option['description'] as String?;
+    final selected = _selections[q.id]?.contains(label) ?? false;
+    final tile = ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+      minVerticalPadding: 4,
+      leading: _ChoiceMarker(
+        multi: multi,
+        selected: selected,
+        color: colors.secondary,
+      ),
+      title: Text(label, style: const TextStyle(fontSize: 13.5)),
+      subtitle: desc != null
+          ? Text(desc, style: const TextStyle(fontSize: 11.5, height: 1.3))
+          : null,
+      onTap: () {
+        setState(() {
+          final set = _selections.putIfAbsent(q.id, () => <String>{});
+          if (multi) {
+            selected ? set.remove(label) : set.add(label);
+          } else {
+            set
+              ..clear()
+              ..add(label);
+          }
+        });
+      },
+    );
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: selected ? colors.secondary.withValues(alpha: .1) : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: selected ? colors.secondary.withValues(alpha: .5) : Colors.transparent,
+        ),
+      ),
+      child: tile,
+    );
+  }
+
+  /// custom 输入(multiSelect 专属;协议:custom 仅多选可带、空串拒)。
+  List<Widget> _customField(AskUserQuestionItem q, ColorScheme colors) {
+    final controller = _customs.putIfAbsent(q.id, TextEditingController.new);
+    return [
+      const SizedBox(height: 4),
+      TextField(
+        controller: controller,
+        onChanged: (_) => setState(() {}),
+        style: const TextStyle(fontSize: 13),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: '补充自定义内容(可选)',
+          prefixIcon: const Icon(Icons.edit_note, size: 18),
+          filled: true,
+          fillColor: colors.surface.withValues(alpha: .75),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+      ),
+    ];
+  }
+}
+
+/// 选项标记:单选圆点 / 多选方勾(语义区分,纯视觉)。
+class _ChoiceMarker extends StatelessWidget {
+  const _ChoiceMarker({required this.multi, required this.selected, required this.color});
+  final bool multi;
+  final bool selected;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    if (multi) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 20,
+        height: 20,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(5),
+          border: Border.all(color: selected ? color : Theme.of(context).colorScheme.outline, width: 1.8),
+          color: selected ? color : Colors.transparent,
+        ),
+        child: selected
+            ? const Icon(Icons.check, size: 14, color: Colors.white)
+            : null,
+      );
+    }
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      width: 20,
+      height: 20,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: selected ? color : Theme.of(context).colorScheme.outline, width: 1.8),
+        color: selected ? color : Colors.transparent,
+      ),
+      child: selected
+          ? Center(
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+              ),
+            )
+          : null,
+    );
   }
 }
 
@@ -192,43 +476,58 @@ class QueueDock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    return Card(
+    final colors = Theme.of(context).colorScheme;
+    return Container(
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('排队消息(' + items.length.toString() + ')',
-                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            for (final item in items)
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(
-                  item['placement'] == 'steering'
-                      ? Icons.call_split
-                      : item['placement'] == 'context'
-                          ? Icons.library_books
-                          : Icons.schedule,
-                  size: 18,
-                ),
-                title: Text(
-                  _preview(item),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13),
-                ),
-                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                  if (onRemove != null)
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, size: 18),
-                      onPressed: () => onRemove!(item),
-                    ),
-                ]),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: .4)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.schedule_send_outlined, size: 15, color: colors.primary),
+              const SizedBox(width: 6),
+              Text(
+                '排队消息(${items.length})',
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5),
               ),
-          ],
-        ),
+            ],
+          ),
+          for (final item in items)
+            ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              leading: Icon(
+                item['placement'] == 'steering'
+                    ? Icons.call_split
+                    : item['placement'] == 'context'
+                        ? Icons.library_books
+                        : Icons.schedule,
+                size: 18,
+                color: colors.onSurfaceVariant,
+              ),
+              title: Text(
+                _preview(item),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13),
+              ),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (onRemove != null)
+                  IconButton(
+                    tooltip: '移除',
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    onPressed: () => onRemove!(item),
+                  ),
+              ]),
+            ),
+        ],
       ),
     );
   }

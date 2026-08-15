@@ -5,6 +5,7 @@ import 'package:singleman/connection/remote_auth.dart';
 
 /// 登录成功回调:凭证已写入 provider/store,调用方负责继续启动。
 typedef RemoteLoginDone = Future<void> Function(RemoteLoginSuccess success);
+
 class RemoteLoginPage extends StatefulWidget {
   const RemoteLoginPage({
     super.key,
@@ -12,12 +13,16 @@ class RemoteLoginPage extends StatefulWidget {
     required this.onDone,
     this.initialUrl = kDefaultGatewayBase,
     this.title = '连接到 DSH 网关',
+    this.popOnDone = true,
   });
 
   final RemoteAuthenticator auth;
   final RemoteLoginDone onDone;
   final String initialUrl;
   final String title;
+
+  /// 路由页默认登录成功后退出;根节点登录门卫由父级切换页面,不弹栈。
+  final bool popOnDone;
 
   @override
   State<RemoteLoginPage> createState() => _RemoteLoginPageState();
@@ -64,7 +69,7 @@ class _RemoteLoginPageState extends State<RemoteLoginPage> {
         device: 'singleman-${Theme.of(context).platform.name}',
       );
       await widget.onDone(success);
-      if (mounted) Navigator.of(context).pop(true);
+      if (mounted && widget.popOnDone) Navigator.of(context).pop(true);
     } on RemoteLoginFailure catch (e) {
       setState(() {
         _busy = false;
@@ -120,9 +125,11 @@ class _RemoteLoginPageState extends State<RemoteLoginPage> {
                     decoration: InputDecoration(
                       labelText: '网关密码',
                       suffixIcon: IconButton(
-                        icon: Icon(_obscure
-                            ? Icons.visibility_outlined
-                            : Icons.visibility_off_outlined),
+                        icon: Icon(
+                          _obscure
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                        ),
                         onPressed: () => setState(() => _obscure = !_obscure),
                       ),
                     ),
@@ -133,8 +140,7 @@ class _RemoteLoginPageState extends State<RemoteLoginPage> {
                       padding: const EdgeInsets.only(bottom: 12),
                       child: Text(
                         _error!,
-                        style:
-                            TextStyle(color: scheme.error, fontSize: 13),
+                        style: TextStyle(color: scheme.error, fontSize: 13),
                       ),
                     ),
                   FilledButton(

@@ -86,7 +86,11 @@ Future<void> maybeShowWelcomeOnboarding(
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: Theme.of(context).colorScheme.surface,
+    backgroundColor: Colors.transparent,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+    ),
+    clipBehavior: Clip.antiAlias,
     builder: (context) =>
         WelcomeOnboarding(controller: controller, onFinished: onFinished),
   );
@@ -108,32 +112,40 @@ class WelcomeOnboarding extends StatefulWidget {
 }
 
 class _Step {
-  const _Step(this.icon, this.title, this.body);
+  const _Step(this.eyebrow, this.icon, this.title, this.body, this.tags);
+  final String eyebrow;
   final IconData icon;
   final String title;
   final String body;
+  final List<String> tags;
 }
 
 const List<_Step> _steps = <_Step>[
   _Step(
+    '你的 AI 工作台',
     Icons.auto_awesome,
     '欢迎使用 singleman',
     'singleman 是 dsh 桌面 GUI 的 Flutter 客户端,支持桌面与移动双形态。'
         '桌面端提供完整工作区与设置能力;移动端为触控优化,常用操作一触即达,'
         '两个形态共用同一份会话与配置。',
+    ['桌面 + 移动', '会话同步', '触控优化'],
   ),
   _Step(
+    '连接，清晰可控',
     Icons.lan_outlined,
     '连接形态',
     '本机连接(loopback)解锁全部功能,包括设置、凭据与模型配置。'
         '局域网(LAN)连接保留核心聊天、审批与队列能力,'
         '特权面板(设置/凭据/目录选择)自动隐藏,连接前请确认信任围栏。',
+    ['loopback · 全功能', 'LAN · 核心能力', '信任围栏'],
   ),
   _Step(
+    '准备就绪',
     Icons.flag_outlined,
     '开始使用',
     '创建或选择一个会话即可开始对话;侧栏可切换工作区,'
         '右上角可随时进入设置调整外观、连接与模型。祝使用愉快!',
+    ['选择会话', '切换工作区', '随时调整'],
   ),
 ];
 
@@ -176,9 +188,22 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final isNarrow = constraints.maxWidth < 600;
-          final content = Padding(
+          final content = Container(
             key: const ValueKey('onboarding-sheet-content'),
-            padding: const EdgeInsets.fromLTRB(24, 14, 24, 16),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  scheme.surface,
+                  Color.alphaBlend(
+                    scheme.primary.withValues(alpha: .045),
+                    scheme.surface,
+                  ),
+                ],
+              ),
+            ),
+            padding: const EdgeInsets.fromLTRB(24, 14, 24, 18),
             child: _buildContent(context, scheme, step),
           );
           // 移动硬性:窄屏步骤内容全屏化(≈92% 可用高,内容区滚动);
@@ -191,7 +216,7 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
                 )
               : ConstrainedBox(
                   key: const ValueKey('onboarding-sheet'),
-                  constraints: const BoxConstraints(maxHeight: 420),
+                  constraints: const BoxConstraints(maxHeight: 520),
                   child: content,
                 );
         },
@@ -201,7 +226,7 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
 
   Widget _buildContent(BuildContext context, ColorScheme scheme, _Step step) {
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize: MainAxisSize.max,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // 拖拽条(触屏语义)。
@@ -215,39 +240,101 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
             ),
           ),
         ),
-        const SizedBox(height: 20),
-        Icon(step.icon, size: 44, color: scheme.primary),
         const SizedBox(height: 14),
-        Text(
-          step.title,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: scheme.onSurface,
-          ),
-        ),
-        const SizedBox(height: 12),
-        Flexible(
-          child: SingleChildScrollView(
-            child: Text(
-              step.body,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 14,
-                height: 1.5,
-                color: scheme.onSurfaceVariant,
+        Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(9),
+              child: Image.asset(
+                'assets/singleman_icon_master.png',
+                width: 30,
+                height: 30,
+                filterQuality: FilterQuality.high,
               ),
+            ),
+            const SizedBox(width: 9),
+            Text(
+              'singleman',
+              style: TextStyle(
+                color: scheme.onSurface,
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -.2,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '${(_index + 1).toString().padLeft(2, '0')} / ${_steps.length.toString().padLeft(2, '0')}',
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildVisual(scheme, step),
+                const SizedBox(height: 20),
+                Text(
+                  step.eyebrow.toUpperCase(),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: scheme.primary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.7,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  step.title,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 27,
+                    height: 1.1,
+                    letterSpacing: -.8,
+                    fontWeight: FontWeight.w800,
+                    color: scheme.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  step.body,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.55,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: [
+                    for (final tag in step.tags) _buildTag(scheme, tag),
+                  ],
+                ),
+              ],
             ),
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         // 进度点。
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [for (var i = 0; i < _steps.length; i++) _dot(scheme, i)],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         // 按钮行:上一步 / 不再提示 / 下一步(完成)。
         Row(
           children: [
@@ -276,6 +363,122 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
       ],
     );
   }
+
+  Widget _buildVisual(ColorScheme scheme, _Step step) {
+    final accent = _index == 1 ? scheme.tertiary : scheme.primary;
+    return SizedBox(
+      height: 154,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: accent.withValues(alpha: .18)),
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    accent.withValues(alpha: .16),
+                    scheme.primary.withValues(alpha: .04),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned(top: -36, right: -18, child: _glowCircle(accent, 110)),
+          Positioned(
+            bottom: -46,
+            left: -28,
+            child: _glowCircle(scheme.primary, 118),
+          ),
+          Center(
+            child: Container(
+              width: 94,
+              height: 94,
+              padding: const EdgeInsets.all(7),
+              decoration: BoxDecoration(
+                color: scheme.surface,
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: accent.withValues(alpha: .4)),
+                boxShadow: [
+                  BoxShadow(
+                    color: accent.withValues(alpha: .24),
+                    blurRadius: 26,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(21),
+                child: Image.asset(
+                  'assets/singleman_icon_master.png',
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.high,
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 16,
+            top: 15,
+            child: Text(
+              'SINGLEMAN / CORE',
+              style: TextStyle(
+                color: scheme.onSurfaceVariant.withValues(alpha: .82),
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ),
+          Positioned(
+            right: 15,
+            bottom: 14,
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: .16),
+                shape: BoxShape.circle,
+                border: Border.all(color: accent.withValues(alpha: .28)),
+              ),
+              child: Icon(step.icon, size: 19, color: accent),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _glowCircle(Color color, double size) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      gradient: RadialGradient(
+        colors: [color.withValues(alpha: .19), color.withValues(alpha: 0)],
+      ),
+    ),
+  );
+
+  Widget _buildTag(ColorScheme scheme, String label) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+    decoration: BoxDecoration(
+      color: scheme.surfaceContainerHighest.withValues(alpha: .58),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: scheme.outlineVariant.withValues(alpha: .48)),
+    ),
+    child: Text(
+      label,
+      style: TextStyle(
+        color: scheme.onSurfaceVariant,
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+  );
 
   Widget _dot(ColorScheme scheme, int i) {
     final active = i == _index;

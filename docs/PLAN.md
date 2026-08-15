@@ -136,9 +136,15 @@
   → dsh 信任围栏按「桌面同机」放行,特权方法(settings/credentials)对持令牌设备开放,
   鉴权边界收敛于网关一处
 - **服务器负载**(用户关切"是否只首次连接"):**不是** —— 全部客户端↔dsh 流量持续经
-  服务器中转,但它是纯字节管道(聊天 JSON/图片,KB~MB 级;实测常驻 4.9MB 内存/9ms CPU),
-  且 LLM 供应商流量(dsh↔provider,真正的大头)不经服务器;2C2G 绰绰有余。
-  P2P 打洞(仅首连用服务器)需 WebRTC 级穿透栈,复杂度不成立
+  服务器中转,但它是纯字节管道(聊天 JSON/图片,KB~MB 级;LLM 供应商流量
+  dsh↔provider 不经服务器)。2026-08-15 活体复测修正初测数字(4.9MB/9ms 系
+  刚重启未登录的新进程瞬时读数):稳态常驻 ~46MB RSS(argon2 首登 memory-hard
+  校验 + glibc 滞留,VmHWM=稳态无增长)、全路径 CPU ~13ms/MB(sshd 隧道 ~9 +
+  gateway ~2.5 + nginx ~3.5,每毫秒换 ~77KB 中转)、单流 ~14Mbps/聚合 ~28Mbps
+  (带宽是真实上限而非 CPU/内存)→ 2C2G 仍绰绰有余,结论不变、数字修正。
+  P2P 打洞(仅首连用服务器)需 WebRTC 级穿透栈(in-app 只剩 DataChannel 或仍在
+  IETF draft 的 QUIC 打洞;蜂窝 CGNAT 下仍需 TURN 兜底 = 服务器回到数据路径),
+  复杂度不成立
 - **客户端**:凭证存 `~/.singleman/credentials.json`(app 沙箱内;密码永不落盘);
   启动按凭证决策(loopback 直连 / 远程静默连 / 远程首登);401 → 停退避重试、拉起
   重登页,令牌原地刷新后 resume;PrivilegeScope 增 `authenticatedRemote`(远程鉴权

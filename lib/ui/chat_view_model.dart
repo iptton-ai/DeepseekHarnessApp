@@ -116,7 +116,19 @@ class ChatViewModel extends ChangeNotifier {
       List.unmodifiable([..._bubbles, ..._ephemeral]);
 
   /// 当前会话的节点流(空日志为空列表;UI 优先用它,bubbles 保留为兜底)。
-  List<ChatNode> get nodes => List.unmodifiable(_nodes);
+  /// 乐观占位(刚发送、真帧未回流)以负数 seq 的 ChatNodeUser 追加在尾:
+  /// 节点流渲染路径与 bubbles 路径的即发即见体验对齐。
+  List<ChatNode> get nodes => _ephemeral.isEmpty
+      ? List.unmodifiable(_nodes)
+      : List.unmodifiable([
+          ..._nodes,
+          for (var i = 0; i < _ephemeral.length; i++)
+            ChatNodeUser(
+              seq: -1 - i,
+              type: 'user/message/ephemeral',
+              text: _ephemeral[i].text,
+            ),
+        ]);
 
   // M3 交互帧(interactor 可为 null:纯聊天场景/测试)。
   InteractorStore? interactor;

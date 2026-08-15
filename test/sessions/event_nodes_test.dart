@@ -8,15 +8,21 @@ import 'package:singleman/sessions/event_nodes.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 探针式假事件:data 形状按线上弹性键构造(覆盖不了的按 data 原样渲染)。
-SessionEvent _ev(int seq, String type, dynamic data) =>
-    SessionEvent(type: type, seq: seq, time: 1786723605000 + seq.toDouble(), data: data);
+SessionEvent _ev(int seq, String type, dynamic data) => SessionEvent(
+  type: type,
+  seq: seq,
+  time: 1786723605000 + seq.toDouble(),
+  data: data,
+);
 
 /// 便捷输入对:事件 + 可选 view(缺省 = 历史回放无 view)。
 EventNodeInput _in(int seq, String type, dynamic data, [ToolEventView? view]) =>
     EventNodeInput(_ev(seq, type, data), view);
 
-ToolEventView _callView(Map<String, dynamic> view) => ToolEventViewCall(view: view);
-ToolEventView _resultView(Map<String, dynamic> view) => ToolEventViewResult(view: view);
+ToolEventView _callView(Map<String, dynamic> view) =>
+    ToolEventViewCall(view: view);
+ToolEventView _resultView(Map<String, dynamic> view) =>
+    ToolEventViewResult(view: view);
 
 void main() {
   test('user/message → 用户气泡(文本提取)', () {
@@ -81,7 +87,9 @@ void main() {
   });
 
   test('独立 think 事件(assistant/reasoning)→ ChatNodeThink', () {
-    final nodes = extractNodes([_in(3, 'assistant/reasoning', {'text': '推理中…'})]);
+    final nodes = extractNodes([
+      _in(3, 'assistant/reasoning', {'text': '推理中…'}),
+    ]);
     expect(nodes, hasLength(1));
     final n = nodes.single as ChatNodeThink;
     expect(n.text, '推理中…');
@@ -101,10 +109,14 @@ void main() {
 
   test('tool call+result 经 view 配对 → 单个成功卡(含输入输出)', () {
     final nodes = extractNodes([
-      _in(4, 'tool/call', {'name': 'bash', 'callId': 'c1', 'input': {'cmd': 'ls'}},
-          _callView({'toolName': 'bash'})),
-      _in(5, 'tool/result', {'callId': 'c1'},
-          _resultView({'status': 'success', 'output': 'file.txt'})),
+      _in(4, 'tool/call', {
+        'name': 'bash',
+        'callId': 'c1',
+        'input': {'cmd': 'ls'},
+      }, _callView({'toolName': 'bash'})),
+      _in(5, 'tool/result', {
+        'callId': 'c1',
+      }, _resultView({'status': 'success', 'output': 'file.txt'})),
     ]);
     expect(nodes, hasLength(1));
     final tool = nodes.single as ChatNodeTool;
@@ -119,7 +131,11 @@ void main() {
 
   test('历史回放无 view 也能渲染工具卡:全以 event.data 为准', () {
     final nodes = extractNodes([
-      _in(4, 'tool/call', {'name': 'bash', 'callId': 'c1', 'input': {'cmd': 'ls'}}),
+      _in(4, 'tool/call', {
+        'name': 'bash',
+        'callId': 'c1',
+        'input': {'cmd': 'ls'},
+      }),
       _in(5, 'tool/result', {'callId': 'c1', 'output': 'file.txt'}),
     ]);
     expect(nodes, hasLength(1));
@@ -132,10 +148,13 @@ void main() {
 
   test('工具卡本质信息以 data 为准:view 与 data 冲突时取 data', () {
     final nodes = extractNodes([
-      _in(4, 'tool/call', {'name': 'read', 'callId': 'c1'},
-          _callView({'toolName': 'bash'})),
-      _in(5, 'tool/result', {'callId': 'c1'},
-          _resultView({'status': 'failed', 'error': 'x'})),
+      _in(4, 'tool/call', {
+        'name': 'read',
+        'callId': 'c1',
+      }, _callView({'toolName': 'bash'})),
+      _in(5, 'tool/result', {
+        'callId': 'c1',
+      }, _resultView({'status': 'failed', 'error': 'x'})),
     ]);
     final tool = nodes.single as ChatNodeTool;
     expect(tool.toolName, 'read'); // data 的 name 胜出
@@ -146,7 +165,11 @@ void main() {
 
   test('tool call 无 result → 保持运行中卡(未配对渲染运行中)', () {
     final nodes = extractNodes([
-      _in(4, 'tool/call', {'name': 'bash', 'callId': 'c1', 'input': {'cmd': 'ls'}}),
+      _in(4, 'tool/call', {
+        'name': 'bash',
+        'callId': 'c1',
+        'input': {'cmd': 'ls'},
+      }),
     ]);
     expect(nodes, hasLength(1));
     final tool = nodes.single as ChatNodeTool;
@@ -157,8 +180,9 @@ void main() {
 
   test('tool result 无 call 且 view 带 error → 独立失败卡', () {
     final nodes = extractNodes([
-      _in(5, 'tool/result', {'callId': 'orphan'},
-          _resultView({'status': 'failed', 'error': '权限不足'})),
+      _in(5, 'tool/result', {
+        'callId': 'orphan',
+      }, _resultView({'status': 'failed', 'error': '权限不足'})),
     ]);
     expect(nodes, hasLength(1));
     final tool = nodes.single as ChatNodeTool;
@@ -168,8 +192,16 @@ void main() {
 
   test('两个 call 按 callId 交叉配对(不按到达顺序错配)', () {
     final nodes = extractNodes([
-      _in(4, 'tool/call', {'name': 'read', 'callId': 'cA', 'input': {'path': 'a'}}),
-      _in(5, 'tool/call', {'name': 'read', 'callId': 'cB', 'input': {'path': 'b'}}),
+      _in(4, 'tool/call', {
+        'name': 'read',
+        'callId': 'cA',
+        'input': {'path': 'a'},
+      }),
+      _in(5, 'tool/call', {
+        'name': 'read',
+        'callId': 'cB',
+        'input': {'path': 'b'},
+      }),
       _in(6, 'tool/result', {'callId': 'cB'}),
       _in(7, 'tool/result', {'callId': 'cA'}),
     ]);
@@ -243,11 +275,274 @@ void main() {
   });
 
   test('未知类型 → 兜底节点(类型名 + 原始 data 保留)', () {
-    final nodes = extractNodes([_in(13, 'mystery/thing', {'x': 1})]);
+    final nodes = extractNodes([
+      _in(13, 'mystery/thing', {'x': 1}),
+    ]);
     expect(nodes, hasLength(1));
     final u = nodes.single as ChatNodeUnknown;
     expect(u.type, 'mystery/thing');
     expect(u.data, {'x': 1});
+  });
+
+  test('已知协议状态事件 → 人类可读提示;turn 边界不进入聊天流', () {
+    final nodes = extractNodes([
+      _in(13, 'turn/start', <String, dynamic>{}),
+      _in(14, 'sandbox/mode', {'mode': 'workspace-write'}),
+      _in(15, 'turn/end', <String, dynamic>{}),
+    ]);
+    expect(nodes, hasLength(1));
+    final notice = nodes.single as ChatNodeNotice;
+    expect(notice.title, '沙箱模式已更新');
+    expect(notice.detail, 'workspace-write');
+  });
+
+
+// ---------------------------------------------------------------------------
+// 展示逻辑对齐真实线上形状(dsh-session known-event-types + 本机日志普查)
+// ---------------------------------------------------------------------------
+
+  test('assistant/chunk 流式折叠:同 (turn,step) 的 delta 合并为直播节点', () {
+    final nodes = extractNodes([
+      _in(1, 'turn/start', {'turn': 1}),
+      _in(2, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'block-start', 'index': 0, 'blockType': 'reasoning'},
+      }),
+      _in(3, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'reasoning-delta', 'index': 0, 'text': '想想'},
+      }),
+      _in(4, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'block-start', 'index': 1, 'blockType': 'text'},
+      }),
+      _in(5, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 1, 'text': '你好'},
+      }),
+      _in(6, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 1, 'text': ',世界'},
+      }),
+    ]);
+    // think(直播)+ assistant(直播)两个节点,文本为累计增量。
+    expect(nodes, hasLength(2));
+    final think = nodes.whereType<ChatNodeThink>().single;
+    expect(think.text, '想想');
+    expect(think.streaming, isTrue);
+    final text = nodes.whereType<ChatNodeAssistant>().single;
+    expect(text.text, '你好,世界');
+    expect(text.streaming, isTrue);
+  });
+
+  test('assistant/chunk 折叠被同 (turn,step) 的 assistant/message 定稿替换', () {
+    final nodes = extractNodes([
+      _in(2, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 0, 'text': '直播中'},
+      }),
+      _in(3, 'assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': {
+          'role': 'assistant',
+          'content': [
+            {'type': 'text', 'text': '定稿文本'},
+          ],
+        },
+      }),
+    ]);
+    expect(nodes, hasLength(1));
+    final n = nodes.single as ChatNodeAssistant;
+    expect(n.text, '定稿文本');
+    expect(n.streaming, isFalse);
+  });
+
+  test('assistant/chunk 折叠:turn/end 之后的残留游不再标记 streaming', () {
+    final nodes = extractNodes([
+      _in(2, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 0, 'text': '被中断的输出'},
+      }),
+      _in(3, 'turn/end', {'turn': 1}),
+    ]);
+    final n = nodes.whereType<ChatNodeAssistant>().single;
+    expect(n.text, '被中断的输出');
+    expect(n.streaming, isFalse);
+  });
+
+  test('tool/result 嵌套形状(线上 data.message.content[].tool-result)无 view 完整渲染', () {
+    final nodes = extractNodes([
+      _in(10, 'tool/call', {
+        'turn': 1, 'step': 2,
+        'callId': 'call_x',
+        'name': 'bash',
+        'arguments': '{"command":"ls","description":"x"}',
+      }),
+      _in(11, 'tool/result', {
+        'turn': 1, 'step': 2,
+        'message': {
+          'source': {'kind': 'tool', 'callId': 'call_x'},
+          'role': 'user',
+          'content': [
+            {
+              'type': 'tool-result',
+              'toolCallId': 'call_x',
+              'content': [
+                {'type': 'text', 'text': 'file-a.txt'},
+                {'type': 'text', 'text': 'file-b.txt'},
+              ],
+              'isError': false,
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(nodes, hasLength(1));
+    final tool = nodes.single as ChatNodeTool;
+    expect(tool.toolName, 'bash');
+    expect(tool.callId, 'call_x');
+    expect(tool.status, ToolStatus.success);
+    // 输出从嵌套 tool-result 块拼接;输入 JSON 字符串被解码为结构。
+    expect(tool.output, 'file-a.txt\nfile-b.txt');
+    expect(tool.input, {
+      'command': 'ls',
+      'description': 'x',
+    });
+    // bash 摘要取 command 字段。
+    expect(tool.summary, 'ls');
+  });
+
+  test('tool/result isError=true → 失败卡 + 错误文本取输出', () {
+    final nodes = extractNodes([
+      _in(10, 'tool/call', {'callId': 'c1', 'name': 'bash'}),
+      _in(11, 'tool/result', {
+        'message': {
+          'source': {'kind': 'tool', 'callId': 'c1'},
+          'content': [
+            {
+              'type': 'tool-result',
+              'toolCallId': 'c1',
+              'content': [
+                {'type': 'text', 'text': 'command not found'},
+              ],
+              'isError': true,
+            },
+          ],
+        },
+      }),
+    ]);
+    final tool = nodes.single as ChatNodeTool;
+    expect(tool.status, ToolStatus.failed);
+    expect(tool.error, 'command not found');
+  });
+
+  test('todo/write 线上形状:{content,status} 计入标题与完成态', () {
+    final nodes = extractNodes([
+      _in(20, 'todo/write', {
+        'todos': [
+          {'content': '调研', 'status': 'completed'},
+          {'content': '编码', 'status': 'in_progress'},
+          {'content': '测试', 'status': 'pending'},
+        ],
+      }),
+    ]);
+    final todo = nodes.single as ChatNodeTodo;
+    expect(todo.total, 3);
+    expect(todo.done, 1);
+    expect(todo.items.map((i) => i.title).toList(), ['调研', '编码', '测试']);
+  });
+
+  test('llm/retry 线上形状:failure.message 作原因,retry/maxRetries 作次数', () {
+    final nodes = extractNodes([
+      _in(30, 'llm/retry', {
+        'retry': 1,
+        'maxRetries': 2,
+        'failure': {'message': '500: 网络错误', 'code': 'SERVER'},
+      }),
+      _in(31, 'llm/retry-started', {'retry': 1}),
+    ]);
+    // retry-started 是重复噪音,只留一行。
+    expect(nodes, hasLength(1));
+    final r = nodes.single as ChatNodeRetry;
+    expect(r.reason, '500: 网络错误');
+    expect(r.attempt, 1);
+    expect(r.maxRetries, 2);
+  });
+
+  test('approval/asked + approval/decided → 审批轨迹短提示', () {
+    final nodes = extractNodes([
+      _in(40, 'approval/asked', {
+        'id': 'ap1',
+        'toolName': 'bash',
+        'callId': 'c9',
+        'reason': 'escalate sandbox',
+      }),
+      _in(41, 'approval/decided', {
+        'id': 'ap1',
+        'outcome': 'allowed-once',
+      }),
+    ]);
+    expect(nodes, hasLength(2));
+    final asked = nodes[0] as ChatNodeNotice;
+    expect(asked.title, '等待审批');
+    expect(asked.detail, contains('bash'));
+    expect(asked.detail, contains('escalate sandbox'));
+    final decided = nodes[1] as ChatNodeNotice;
+    expect(decided.title, '审批已处理');
+    expect(decided.detail, '已允许(仅此一次)');
+  });
+
+  test('协议管道事件不进主聊天流(不再伪装成未知事件)', () {
+    final nodes = extractNodes([
+      _in(1, 'step/start', {'turn': 1, 'step': 1}),
+      _in(2, 'step/end', {'turn': 1, 'step': 1}),
+      _in(3, 'request/context', {'provider': 'x', 'model': 'm'}),
+      _in(4, 'request/header', {'k': 1}),
+      _in(5, 'session/title', {'title': 't'}),
+      _in(6, 'session/title-llm-request', {}),
+      _in(7, 'session/end-seed', {}),
+      _in(8, 'subagent/descriptor', {}),
+      _in(9, 'feedback/record', {}),
+      _in(10, 'tool/code-dispatch', {'subCallId': 's1'}),
+      _in(11, 'tool/code-dispatch-start', {'subCallId': 's1'}),
+      _in(12, 'hook/invoked', {}),
+      _in(13, 'hook/result', {}),
+      _in(14, 'web/deepseek-search-llm-request', {}),
+    ]);
+    expect(nodes, isEmpty);
+  });
+
+  test('tool-workflow / plan/mode / schedule/change → 短提示', () {
+    final nodes = extractNodes([
+      _in(1, 'tool-workflow/run-start', {'name': 'audit'}),
+      _in(2, 'tool-workflow/run-end', {'name': 'audit'}),
+      _in(3, 'tool-workflow/agent-start', {'label': '审计员 A'}),
+      _in(4, 'tool-workflow/agent-end', {'label': '审计员 A'}),
+      _in(5, 'plan/mode', {'mode': 'plan'}),
+      _in(6, 'schedule/change', {'name': '日报'}),
+    ]);
+    expect(nodes, hasLength(6));
+    expect(nodes.every((n) => n is ChatNodeNotice), isTrue);
+    expect((nodes[0] as ChatNodeNotice).title, '工作流已启动');
+    expect((nodes[3] as ChatNodeNotice).title, '子代理已结束');
+    expect((nodes[4] as ChatNodeNotice).title, '计划模式已切换');
+    expect((nodes[5] as ChatNodeNotice).title, '定时任务已更新');
+  });
+
+  test('agent/inbox/spliced → 注入/移除计数', () {
+    final nodes = extractNodes([
+      _in(1, 'agent/inbox/spliced', {
+        'target': 'next-turn',
+        'inserted': [
+          {'content': []},
+          {'content': []},
+        ],
+        'removedCount': 1,
+      }),
+    ]);
+    final n = nodes.single as ChatNodeNotice;
+    expect(n.title, '上下文已更新');
+    expect(n.detail, '注入 2 条 · 移除 1 条');
   });
 
   test('乱序输入 → seq 升序输出;两次提取一致(纯函数可重放)', () {
@@ -271,8 +566,10 @@ void main() {
     // 排序不变式:输出按 seq 升序。
     expect(first.map((n) => n.seq).toList(), [1, 2, 3]);
     // 可重放:两次提取的类型序列与内容一致。
-    expect(first.map((n) => n.runtimeType).toList(),
-        second.map((n) => n.runtimeType).toList());
+    expect(
+      first.map((n) => n.runtimeType).toList(),
+      second.map((n) => n.runtimeType).toList(),
+    );
     final texts = <String>[];
     for (final n in first) {
       if (n is ChatNodeUser) texts.add(n.text);

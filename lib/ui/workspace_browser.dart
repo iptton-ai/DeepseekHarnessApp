@@ -56,6 +56,8 @@ class WorkspaceBrowser extends StatefulWidget {
     required this.sessionStream,
     required this.initialSessions,
     required this.callbacks,
+    this.query = '',
+    this.selectedSessionId,
     this.initialExpandedCount = 5,
   });
 
@@ -67,6 +69,8 @@ class WorkspaceBrowser extends StatefulWidget {
   /// 挂载时的会话快照(广播流无重放,seed 防首帧空白)。
   final List<SessionSummary> initialSessions;
   final WorkspaceBrowserCallbacks callbacks;
+  final String query;
+  final String? selectedSessionId;
 
   /// 每组默认显示条数,超出折叠为「展开其余」。
   final int initialExpandedCount;
@@ -79,8 +83,12 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
   List<WorkspaceView> _workspaces = const <WorkspaceView>[];
   Set<String> _archived = const <String>{};
   List<SessionSummary> _sessions = const <SessionSummary>[];
+
   /// 已「展开其余」的分组键(未分组桶用空串)。
   final Set<String> _expanded = <String>{};
+
+  /// 整个分组的折叠状态;默认展开,仅在用户主动点击标题时改变。
+  final Set<String> _collapsed = <String>{};
   StreamSubscription<List<WorkspaceView>>? _wsSub;
   StreamSubscription<List<String>>? _archSub;
   StreamSubscription<List<SessionSummary>>? _sessionSub;
@@ -117,8 +125,12 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
       for (final ws in _workspaces) ...ws.sessionIds,
     };
     final visible = _sessions
-        .where((s) =>
-            s.origin != 'subagent' && !_archived.contains(s.sessionId))
+        .where(
+          (s) =>
+              s.origin != 'subagent' &&
+              !_archived.contains(s.sessionId) &&
+              _matches(s),
+        )
         .toList();
     final ungrouped = visible
         .where((s) => !inWorkspaceIds.contains(s.sessionId))
@@ -127,12 +139,13 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
     final children = <Widget>[
       for (final ws in _workspaces) ...[
         _workspaceHeader(ws),
-        ..._sessionRows(ws.workspaceId, _sessionsOf(ws)),
+        if (!_collapsed.contains(ws.workspaceId))
+          ..._sessionRows(ws.workspaceId, _sessionsOf(ws)),
       ],
       // 未分组桶:有未分组会话时展示;无任何工作区时兜底新建会话入口。
       if (ungrouped.isNotEmpty || _workspaces.isEmpty) ...[
         _ungroupedHeader(),
-        ..._sessionRows('', ungrouped),
+        if (!_collapsed.contains('')) ..._sessionRows('', ungrouped),
       ],
     ];
 
@@ -160,15 +173,31 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
       for (final sid in ws.sessionIds)
         if (byId[sid] != null &&
             byId[sid]!.origin != 'subagent' &&
-            !_archived.contains(sid))
+            !_archived.contains(sid) &&
+            _matches(byId[sid]!))
           byId[sid]!,
     ];
+  }
+
+  bool _matches(SessionSummary s) {
+    final query = widget.query.trim().toLowerCase();
+    if (query.isEmpty) return true;
+    final values = s.projections?.values;
+    final titleValue = values == null ? null : values['title'];
+    final title = titleValue is Map && titleValue['title'] is String
+        ? titleValue['title'] as String
+        : null;
+    return s.sessionId.toLowerCase().contains(query) ||
+        (s.cwd ?? '').toLowerCase().contains(query) ||
+        (title ?? '').toLowerCase().contains(query);
   }
 
   Widget _workspaceHeader(WorkspaceView ws) {
     return _headerRow(
       icon: Icons.folder_outlined,
       title: ws.title,
+      groupKey: ws.workspaceId,
+      sessionCount: _sessionsOf(ws).length,
       actions: [
         _SheetAction(
           label: '新建会话',
@@ -195,6 +224,15 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
     return _headerRow(
       icon: Icons.folder_off_outlined,
       title: '未分组',
+      groupKey: '',
+      sessionCount: _sessions
+          .where(
+            (s) =>
+                s.origin != 'subagent' &&
+                !_archived.contains(s.sessionId) &&
+                _matches(s),
+          )
+          .length,
       actions: [
         _SheetAction(
           label: '新建会话',
@@ -208,26 +246,57 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
   Widget _headerRow({
     required IconData icon,
     required String title,
+    required String groupKey,
+    required int sessionCount,
     required List<_SheetAction> actions,
   }) {
+    final colors = Theme.of(context).colorScheme;
+    final collapsed = _collapsed.contains(groupKey);
     return ListTile(
       dense: true,
-      leading: Icon(icon, size: 18),
+      contentPadding: const EdgeInsets.fromLTRB(12, 2, 8, 2),
+      leading: Container(
+        width: 28,
+        height: 28,
+        decoration: BoxDecoration(
+          color: colors.primary.withValues(alpha: .1),
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Icon(icon, size: 16, color: colors.primary),
+      ),
       title: Text(
         title,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
       ),
-      trailing: _MenuButton(actions: actions),
+      subtitle: Text(
+        '$sessionCount 个会话',
+        style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
+      ),
+      onTap: () => setState(() {
+        collapsed ? _collapsed.remove(groupKey) : _collapsed.add(groupKey);
+      }),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MenuButton(actions: actions),
+          Icon(
+            collapsed ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up,
+            size: 20,
+            color: colors.onSurfaceVariant,
+          ),
+        ],
+      ),
     );
   }
 
   /// 组内会话行;默认收 [initialExpandedCount] 条,超出附「展开其余」。
   List<Widget> _sessionRows(String groupKey, List<SessionSummary> rows) {
     final expanded = _expanded.contains(groupKey);
-    final shown =
-        expanded ? rows : rows.take(widget.initialExpandedCount).toList();
+    final shown = expanded
+        ? rows
+        : rows.take(widget.initialExpandedCount).toList();
     return <Widget>[
       for (final s in shown) _sessionRow(s),
       if (rows.length > widget.initialExpandedCount)
@@ -251,24 +320,43 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
   }
 
   Widget _sessionRow(SessionSummary s) {
+    final colors = Theme.of(context).colorScheme;
+    final selected = s.sessionId == widget.selectedSessionId;
     return ListTile(
+      contentPadding: const EdgeInsets.only(left: 24, right: 8),
+      selected: selected,
+      selectedTileColor: colors.primary.withValues(alpha: .12),
       leading: Icon(
         s.running
             ? Icons.autorenew
             : s.blank
-                ? Icons.circle_outlined
-                : Icons.chat_bubble_outline,
+            ? Icons.circle_outlined
+            : Icons.chat_bubble_outline,
         size: 18,
+        color: selected
+            ? colors.primary
+            : s.running
+            ? colors.tertiary
+            : colors.onSurfaceVariant,
       ),
       title: Text(
         _titleOf(s) ?? _fallbackTitle(s.sessionId),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 13),
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+          color: selected ? colors.primary : null,
+        ),
       ),
       subtitle: Text(
         _relativeTime(s.updatedAt),
-        style: const TextStyle(fontSize: 11),
+        style: TextStyle(
+          fontSize: 11,
+          color: selected
+              ? colors.primary.withValues(alpha: .8)
+              : colors.onSurfaceVariant,
+        ),
       ),
       onTap: () => widget.callbacks.onSelectSession(s.sessionId),
       trailing: _MenuButton(
@@ -386,8 +474,11 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
   }
 
   /// 文本输入弹层(bottom sheet,键盘避让);返回 null = 取消。
-  Future<String?> _promptText(BuildContext context, String title,
-      {String? initial}) {
+  Future<String?> _promptText(
+    BuildContext context,
+    String title, {
+    String? initial,
+  }) {
     final controller = TextEditingController(text: initial ?? '');
     return showModalBottomSheet<String>(
       context: context,
@@ -403,8 +494,10 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
                 const SizedBox(height: 8),
                 TextField(
                   controller: controller,
@@ -442,7 +535,11 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
 
 /// 菜单弹层项(≥44dp 行,经 showModalBottomSheet 呈现)。
 class _SheetAction {
-  const _SheetAction({required this.label, required this.icon, required this.onTap});
+  const _SheetAction({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
   final String label;
   final IconData icon;
   final VoidCallback onTap;

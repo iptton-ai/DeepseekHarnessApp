@@ -81,6 +81,35 @@ void main() {
     vm.dispose();
   });
 
+  test('乐观占位气泡同步进入节点流(即发即见);真帧回流后被撤', () async {
+    final view = _FakeView();
+    view.current = [_summary('s1')];
+    view.logFor('s1');
+    final vm = ChatViewModel(store: view, connection: null);
+    view.emit();
+    await Future<void>.delayed(Duration.zero);
+
+    // 发送中:ephemeral 以负数 seq 的 ChatNodeUser 追加在节点流尾部。
+    var sent = <String>[];
+    await vm.send('hello', (id, text) async {
+      sent.add(text);
+      // 真帧在发送 future 完成前尚未回流;此刻节点流应含乐观占位。
+      expect(
+        vm.nodes.whereType<ChatNodeUser>().map((n) => n.text),
+        contains('hello'),
+      );
+    });
+    await Future<void>.delayed(Duration.zero);
+    final log = view.logFor('s1');
+    log.append(_msgEvent(1, 'user', 'hello'));
+    await Future<void>.delayed(Duration.zero);
+    // 真帧到达 → 占位被撤,只剩真实节点(seq=1)。
+    final users = vm.nodes.whereType<ChatNodeUser>().toList();
+    expect(users, hasLength(1));
+    expect(users.single.seq, 1);
+    vm.dispose();
+  });
+
   test('extractText pulls text blocks, skips images', () {
     expect(
       extractText(<String, dynamic>{

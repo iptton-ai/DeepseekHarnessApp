@@ -97,7 +97,10 @@ void boot({
   final base = plan.baseUri;
 
   final api = ApiClient(baseUri: base, authHeaders: authHeaders);
-  final connection = ConnectionController(baseUri: base, authHeaders: authHeaders);
+  final connection = ConnectionController(
+    baseUri: base,
+    authHeaders: authHeaders,
+  );
   final store = SessionStore(api: api, connection: connection);
   final interactor = InteractorStore(api: api, connection: connection);
   final goals = GoalStore(api: api);
@@ -170,20 +173,25 @@ void boot({
   final gatewayAuth = RemoteAuthClient();
   String gatewayLabel() => isLoopbackBase(base)
       ? '本机直连 · 点此配置远程'
-      : (plan.tokenProvider.hasToken ? '已登录 · ${base.host}' : '未登录 · ${base.host}');
+      : (plan.tokenProvider.hasToken
+            ? '已登录 · ${base.host}'
+            : '未登录 · ${base.host}');
   void openGatewayLogin() {
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
-    Navigator.of(ctx).push(MaterialPageRoute<void>(
-      fullscreenDialog: true,
-      builder: (_) => RemoteLoginPage(
-        auth: gatewayAuth,
-        initialUrl:
-            isLoopbackBase(base) ? kDefaultGatewayBase : base.toString(),
-        title: '远程网关登录',
-        onDone: onLoginDone,
+    Navigator.of(ctx).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => RemoteLoginPage(
+          auth: gatewayAuth,
+          initialUrl: isLoopbackBase(base)
+              ? kDefaultGatewayBase
+              : base.toString(),
+          title: '远程网关登录',
+          onDone: onLoginDone,
+        ),
       ),
-    ));
+    );
   }
 
   // W3-C:首用引导(三步;「不再提示」写 ui-onboarding 命名空间,失败本地兜底)。
@@ -207,106 +215,106 @@ void boot({
       needsLogin: plan.needsLogin,
       onLoginDone: onLoginDone,
       child: SinglemanApp(
-      vm: vm,
-      onNewSession: () async {
-        try {
-          await store.createSession();
-        } on Object catch (e) {
-          debugPrint('createSession failed: ' + e.toString());
-        }
-      },
-      actions: SessionActions(
-        onPickModel: () async {
-          final sid = vm.selectedId;
-          if (sid == null) return;
-          final ctx = navigatorKey.currentContext;
-          if (ctx == null) return;
-          final result = await showModelPicker(
-            ctx,
-            loadCatalog: () => store.sessionModels(sid),
+        vm: vm,
+        onNewSession: () async {
+          try {
+            await store.createSession();
+          } on Object catch (e) {
+            debugPrint('createSession failed: ' + e.toString());
+          }
+        },
+        actions: SessionActions(
+          onPickModel: () async {
+            final sid = vm.selectedId;
+            if (sid == null) return;
+            final ctx = navigatorKey.currentContext;
+            if (ctx == null) return;
+            final result = await showModelPicker(
+              ctx,
+              loadCatalog: () => store.sessionModels(sid),
+            );
+            if (result == null) return;
+            try {
+              await store.selectModel(
+                sid,
+                provider: result.provider,
+                model: result.model,
+                reasoningEffort: result.reasoningEffort,
+              );
+            } on Object catch (e) {
+              debugPrint('selectModel failed: ' + e.toString());
+            }
+          },
+          onRename: (sessionId, title) async {
+            try {
+              await store.renameSession(sessionId, title);
+            } on Object catch (e) {
+              debugPrint('rename failed: ' + e.toString());
+            }
+          },
+          onFork: (sessionId) async {
+            try {
+              await store.forkSession(sessionId);
+            } on Object catch (e) {
+              debugPrint('fork failed: ' + e.toString());
+            }
+          },
+          onExport: (sessionId) async {
+            try {
+              final path = Directory.systemTemp.path + '/' + sessionId + '.zip';
+              await store.exportSessionZip(sessionId, path);
+              debugPrint('exported to ' + path);
+            } on Object catch (e) {
+              debugPrint('export failed: ' + e.toString());
+            }
+          },
+          onPickSkill: (_) async {
+            final ctx = navigatorKey.currentContext;
+            if (ctx == null) return;
+            final name = await showSkillSheet(ctx, load: skills.list);
+            if (name == null) return;
+            final sid = vm.selectedId;
+            if (sid == null) return;
+            try {
+              await store.promptText(
+                sid,
+                skills.promptFor(name),
+                clientTimeZone: 'UTC',
+              );
+            } on Object catch (e) {
+              debugPrint('skill prompt failed: ' + e.toString());
+            }
+          },
+        ),
+        sender: (sessionId, text) async {
+          await store.promptText(sessionId, text, clientTimeZone: 'UTC');
+        },
+        steerSender: (sessionId, text, steer) async {
+          // W2:插话 = mode 'steer'(DSH-PROTOCOL §9);静止会话会收 steer-unavailable。
+          await store.promptText(
+            sessionId,
+            text,
+            mode: steer ? 'steer' : 'queue',
+            clientTimeZone: 'UTC',
           );
-          if (result == null) return;
+        },
+        workspaces: workspaces,
+        jobs: jobs,
+        subagents: subagents,
+        settings: settings,
+        scope: scope,
+        commands: commands,
+        directory: directory,
+        attachments: attachments,
+        feedback: feedback,
+        theme: theme,
+        onCancelSession: (sessionId) async {
           try {
-            await store.selectModel(
-              sid,
-              provider: result.provider,
-              model: result.model,
-              reasoningEffort: result.reasoningEffort,
-            );
+            await interactor.cancelSession(sessionId);
           } on Object catch (e) {
-            debugPrint('selectModel failed: ' + e.toString());
+            debugPrint('cancel failed: ' + e.toString());
           }
         },
-        onRename: (sessionId, title) async {
-          try {
-            await store.renameSession(sessionId, title);
-          } on Object catch (e) {
-            debugPrint('rename failed: ' + e.toString());
-          }
-        },
-        onFork: (sessionId) async {
-          try {
-            await store.forkSession(sessionId);
-          } on Object catch (e) {
-            debugPrint('fork failed: ' + e.toString());
-          }
-        },
-        onExport: (sessionId) async {
-          try {
-            final path = Directory.systemTemp.path + '/' + sessionId + '.zip';
-            await store.exportSessionZip(sessionId, path);
-            debugPrint('exported to ' + path);
-          } on Object catch (e) {
-            debugPrint('export failed: ' + e.toString());
-          }
-        },
-        onPickSkill: (_) async {
-          final ctx = navigatorKey.currentContext;
-          if (ctx == null) return;
-          final name = await showSkillSheet(ctx, load: skills.list);
-          if (name == null) return;
-          final sid = vm.selectedId;
-          if (sid == null) return;
-          try {
-            await store.promptText(
-              sid,
-              skills.promptFor(name),
-              clientTimeZone: 'UTC',
-            );
-          } on Object catch (e) {
-            debugPrint('skill prompt failed: ' + e.toString());
-          }
-        },
-      ),
-      sender: (sessionId, text) async {
-        await store.promptText(sessionId, text, clientTimeZone: 'UTC');
-      },
-      steerSender: (sessionId, text, steer) async {
-        // W2:插话 = mode 'steer'(DSH-PROTOCOL §9);静止会话会收 steer-unavailable。
-        await store.promptText(
-          sessionId,
-          text,
-          mode: steer ? 'steer' : 'queue',
-          clientTimeZone: 'UTC',
-        );
-      },
-      workspaces: workspaces,
-      jobs: jobs,
-      subagents: subagents,
-      settings: settings,
-      scope: scope,
-      commands: commands,
-      directory: directory,
-      attachments: attachments,
-      feedback: feedback,
-      theme: theme,
-      onCancelSession: (sessionId) async {
-        try {
-          await interactor.cancelSession(sessionId);
-        } on Object catch (e) {
-          debugPrint('cancel failed: ' + e.toString());
-        }
-      },
         onOpenGatewayLogin: openGatewayLogin,
         gatewayLabel: gatewayLabel(),
       ),
@@ -363,14 +371,23 @@ class _ConnectionGateState extends State<_ConnectionGate> {
   @override
   Widget build(BuildContext context) {
     if (!_showLogin) return widget.child;
-    return RemoteLoginPage(
-      auth: _auth,
-      initialUrl: widget.baseUri.toString(),
-      title: widget.needsLogin ? '连接到 DSH 网关' : '登录已失效,请重新登录',
-      onDone: (success) async {
-        await widget.onLoginDone(success);
-        if (mounted) setState(() => _showLogin = false);
-      },
+    // 首次移动端启动时门卫位于 SinglemanApp 外层,因此这里必须提供
+    // MaterialApp(Directionality/Theme/Navigator) 作为登录页根壳。
+    return MaterialApp(
+      title: 'singleman',
+      theme: _buildAppTheme(Brightness.light),
+      darkTheme: _buildAppTheme(Brightness.dark),
+      themeMode: ThemeMode.system,
+      home: RemoteLoginPage(
+        auth: _auth,
+        initialUrl: widget.baseUri.toString(),
+        title: widget.needsLogin ? '连接到 DSH 网关' : '登录已失效,请重新登录',
+        popOnDone: false,
+        onDone: (success) async {
+          await widget.onLoginDone(success);
+          if (mounted) setState(() => _showLogin = false);
+        },
+      ),
     );
   }
 }

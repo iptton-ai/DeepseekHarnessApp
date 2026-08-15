@@ -152,8 +152,7 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
   String _describeError(Object e) {
     final code = promptErrorCode(e);
     final server = e is RpcBusinessError ? e.error.toJson()['message'] : null;
-    final serverMessage =
-        server is String && server.isNotEmpty ? server : null;
+    final serverMessage = server is String && server.isNotEmpty ? server : null;
     if (code == null && serverMessage == null) {
       // 非业务异常:直出异常原文,便于排查。
       return '发送失败: ${e.toString()}';
@@ -185,111 +184,158 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
     final theme = Theme.of(context);
     final mode = PromptMode.forRunning(widget.running);
     final stopEnabled = widget.running && !_sending;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (_slashActive) _buildCommandMenu(theme),
-        if (widget.attachmentsSlot != null) widget.attachmentsSlot!,
-        TextField(
-          key: const ValueKey('composer-input'),
-          controller: _controller,
-          enabled: widget.canSend,
-          minLines: 1,
-          maxLines: 4,
-          keyboardType: TextInputType.multiline,
-          textInputAction: TextInputAction.newline,
-          onChanged: _onChanged,
-          onSubmitted: _onSubmitted,
-          decoration: InputDecoration(
-            hintText: widget.hintText,
-            border: const OutlineInputBorder(),
-            isDense: true,
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          ),
+    final colors = theme.colorScheme;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow.withValues(alpha: .96),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: widget.running
+              ? colors.tertiary.withValues(alpha: .42)
+              : colors.outlineVariant.withValues(alpha: .65),
         ),
-        if (_error != null)
-          Semantics(
-            liveRegion: true,
-            container: true,
-            child: Container(
-              key: const ValueKey('composer-error'),
-              margin: const EdgeInsets.only(top: 8),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: colors.shadow.withValues(alpha: .06),
+            blurRadius: 18,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_slashActive) _buildCommandMenu(theme),
+          if (widget.attachmentsSlot != null) widget.attachmentsSlot!,
+          TextField(
+            key: const ValueKey('composer-input'),
+            controller: _controller,
+            enabled: widget.canSend,
+            minLines: 1,
+            maxLines: 4,
+            keyboardType: TextInputType.multiline,
+            textInputAction: TextInputAction.newline,
+            onChanged: _onChanged,
+            onSubmitted: _onSubmitted,
+            decoration: InputDecoration(
+              hintText: widget.hintText,
+              prefixIcon: Icon(
+                Icons.edit_note_rounded,
+                color: colors.primary,
+                size: 20,
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.error_outline,
-                      size: 16, color: theme.colorScheme.onErrorContainer),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _error!,
-                      style: TextStyle(
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+            ),
+          ),
+          if (_error != null)
+            Semantics(
+              liveRegion: true,
+              container: true,
+              child: Container(
+                key: const ValueKey('composer-error'),
+                margin: const EdgeInsets.only(top: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 16,
+                      color: theme.colorScheme.onErrorContainer,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
                           fontSize: 12,
-                          color: theme.colorScheme.onErrorContainer),
+                          color: theme.colorScheme.onErrorContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              if (widget.onPickImages != null)
+                SizedBox(
+                  height: 48,
+                  width: 48,
+                  child: IconButton(
+                    key: const ValueKey('composer-attach'),
+                    tooltip: '添加图片',
+                    onPressed: widget.canSend ? widget.onPickImages : null,
+                    icon: const Icon(Icons.add_photo_alternate_outlined),
+                  ),
+                ),
+              const Spacer(),
+              if (widget.onCancel != null) ...[
+                SizedBox(
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('composer-stop'),
+                    onPressed: stopEnabled ? widget.onCancel : null,
+                    icon: const Icon(Icons.stop, size: 20),
+                    label: const Text('停止'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: theme.colorScheme.error,
+                      minimumSize: const Size(0, 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            if (widget.onPickImages != null)
-              SizedBox(
-                height: 48,
-                width: 48,
-                child: IconButton(
-                  key: const ValueKey('composer-attach'),
-                  tooltip: '添加图片',
-                  onPressed: widget.canSend ? widget.onPickImages : null,
-                  icon: const Icon(Icons.add_photo_alternate_outlined),
                 ),
-              ),
-            const Spacer(),
-            if (widget.onCancel != null) ...[
+                const SizedBox(width: 8),
+              ],
               SizedBox(
                 height: 48,
-                child: OutlinedButton.icon(
-                  key: const ValueKey('composer-stop'),
-                  onPressed: stopEnabled ? widget.onCancel : null,
-                  icon: const Icon(Icons.stop, size: 20),
-                  label: const Text('停止'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: theme.colorScheme.error,
-                    minimumSize: const Size(0, 48),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: FilledButton.icon(
+                  key: const ValueKey('composer-send'),
+                  onPressed: _canPrimary ? _send : null,
+                  icon: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 160),
+                    child: _sending
+                        ? const SizedBox(
+                            key: ValueKey('sending-spinner'),
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2.2),
+                          )
+                        : Icon(
+                            key: const ValueKey('send-icon'),
+                            mode == PromptMode.steer
+                                ? Icons.call_made
+                                : Icons.send,
+                          ),
+                  ),
+                  label: Text(mode.label),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(88, 48),
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
             ],
-            SizedBox(
-              height: 48,
-              child: FilledButton.icon(
-                key: const ValueKey('composer-send'),
-                onPressed: _canPrimary ? _send : null,
-                icon: Icon(mode == PromptMode.steer
-                    ? Icons.call_made
-                    : Icons.send),
-                label: Text(mode.label),
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size(88, 48),
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -306,15 +352,21 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
       ),
       child: Row(
         children: [
-          Icon(Icons.keyboard_command_key,
-              size: 16, color: theme.colorScheme.primary),
+          Icon(
+            Icons.keyboard_command_key,
+            size: 16,
+            color: theme.colorScheme.primary,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               '命令菜单(待 W2-D 接入): /${_slashQuery ?? ''}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
         ],

@@ -23,9 +23,9 @@ void main() {
     // 默认收起:内容不可见,只看到标题行。
     expect(find.text('这是被折叠的深度思考内容'), findsNothing);
     expect(find.text('思考过程'), findsOneWidget);
-    // 触控行 ≥44dp 硬性下限(量整卡高度而非文本本身)。
+    // 触控行 ≥44dp 硬性下限(量可点击行高度而非文本本身)。
     final rowSize = tester.getSize(
-        find.ancestor(of: find.text('思考过程'), matching: find.byType(Card)));
+        find.ancestor(of: find.text('思考过程'), matching: find.byType(InkWell)));
     expect(rowSize.height, greaterThanOrEqualTo(44));
     // 点击展开:全文可见。
     await tester.tap(find.text('思考过程'));
@@ -53,19 +53,19 @@ void main() {
       ),
     ];
     await tester.pumpWidget(_wrap(ChatNodeList(nodes: nodes)));
-    // 收起态:名称 + 摘要 + 状态徽标。
-    expect(find.text('bash'), findsOneWidget);
+    // 收起态:名称(人类可读 + 原名) + 摘要 + 状态徽标。
+    expect(find.text('终端命令 · bash'), findsOneWidget);
     expect(find.text('成功'), findsOneWidget);
     expect(find.text('ls -la'), findsOneWidget);
-    // 展开详情:输入/输出标签与内容出现。
-    await tester.tap(find.text('bash'));
+    // 展开详情:输入/输出标签与内容出现 + 复制/全屏常显按钮。
+    await tester.tap(find.text('终端命令 · bash'));
     await tester.pump();
     expect(find.text('输入'), findsOneWidget);
     expect(find.text('输出'), findsOneWidget);
     expect(find.textContaining('ls -la'), findsWidgets);
     expect(find.textContaining('file.txt'), findsWidgets);
-    // 全屏按钮常显(移动端无 hover)。
     expect(find.text('全屏查看'), findsOneWidget);
+    expect(find.text('复制'), findsOneWidget);
   });
 
   testWidgets('assistant markdown 气泡渲染加粗与行内代码', (tester) async {

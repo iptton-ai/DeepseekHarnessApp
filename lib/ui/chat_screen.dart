@@ -1,6 +1,8 @@
 // ChatScreen — 会话主界面(W1 集成:workspace 分组侧栏 + 节点流 + jobs/subagent 入口 + 设置;
 // <600dp 移动形态 = 抽屉侧栏,桌面 ≥600dp 保持双栏,见 PLAN「W1 集成规格」)。
 // 只消费注入的 store 视图与 ChatViewModel,不含任何 socket/HTTP 逻辑。
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -119,20 +121,31 @@ class ChatScreen extends StatelessWidget {
           attachments: attachments,
           feedback: feedback,
           onCancelSession: onCancelSession,
-          onApproval: (a, allow) => vm.interactor?.respondApproval(
-            a.rpcId,
-            a.sessionId,
-            a.approvalId,
-            allow: allow,
-          ),
-          onQuestion: (q, drafts) {
+          onApproval: (a, allow) async {
             final it = vm.interactor;
             if (it == null) return;
+            try {
+              final receipt = await it.respondApproval(
+                a.rpcId,
+                a.sessionId,
+                a.approvalId,
+                allow: allow,
+              );
+              if (receipt.late) {
+                _toast(context, '该审批已被处理(回复过期)');
+              } else if (receipt.malformed) {
+                _toast(context, '审批应答被拒绝: 响应格式问题');
+              }
+            } on Object catch (e) {
+              _toast(context, '审批应答发送失败: ' + e.toString());
+            }
+          },
+          onQuestion: (q, drafts) async {
+            final it = vm.interactor;
+            if (it == null) return '交互通道不可用';
             final err = it.validateQuestionAnswers(q, drafts);
             if (err != null) {
-              vm.lastError = '应答被本地预校验拒绝: ' + err;
-              vm.notifyListeners();
-              return;
+              return '应答不完整: ' + err;
             }
             final payload = drafts
                 .map(
@@ -144,7 +157,18 @@ class ChatScreen extends StatelessWidget {
                   },
                 )
                 .toList();
-            it.respondQuestions(q.rpcId, q.sessionId, payload);
+            try {
+              final receipt = await it.respondQuestions(
+                q.rpcId,
+                q.sessionId,
+                payload,
+              );
+              if (receipt.late) return '该问题已被处理(回复过期)';
+              if (receipt.malformed) return '应答被拒绝: 响应格式问题';
+              return null;
+            } on Object catch (e) {
+              return '应答发送失败: ' + e.toString();
+            }
           },
           onQueueRemove: null,
         );
@@ -881,8 +905,8 @@ class _MessagePane extends StatelessWidget {
   final AttachmentFetchView? attachments;
   final FeedbackStoreView? feedback;
   final void Function(String sessionId)? onCancelSession;
-  final void Function(PendingApproval a, bool allow)? onApproval;
-  final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)?
+  final Future<void> Function(PendingApproval a, bool allow)? onApproval;
+  final Future<String?> Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)?
   onQuestion;
   final void Function(Map<String, dynamic> item)? onQueueRemove;
 
@@ -1163,7 +1187,22 @@ extension on ChatViewModel {
   }
 }
 
-/// 交互帧面板:审批卡 + 问答表单 + 队列 Dock,自订阅 interactor 流。
+void _toast(BuildContext context, String message) {
+  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+    SnackBar(
+      duration: const Duration(milliseconds: 2000),
+      content: Text(message),
+    ),
+  );
+}
+
+/// 交互帧面板:审批卡 + 问答表单 + 队列 Dock。
+/// 刷新安全(硬性纪律 —— 交互卡不因界面刷新丢渲染):
+/// - initState 先用 store.current* 快照播种(错过流事件也能自愈:
+///   重连重放 pending 帧发生在面板挂载之前时,纯 listen 会永远漏渲染);
+/// - 订阅随 vm.interactor 引用变化重挂(vm 是 Listenable,面板随其重建);
+/// - 问答表单/审批卡以 rpcId 为 key,列表增删不丢已选/已输入状态;
+/// - 切换会话时从快照重读当前会话队列(队列流只在变更时推送)。
 class _InteractorPane extends StatefulWidget {
   const _InteractorPane({
     required this.vm,
@@ -1172,8 +1211,8 @@ class _InteractorPane extends StatefulWidget {
     this.onQueueRemove,
   });
   final ChatViewModel vm;
-  final void Function(PendingApproval a, bool allow)? onApproval;
-  final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)?
+  final Future<void> Function(PendingApproval a, bool allow)? onApproval;
+  final Future<String?> Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)?
   onQuestion;
   final void Function(Map<String, dynamic> item)? onQueueRemove;
 
@@ -1185,24 +1224,82 @@ class _InteractorPaneState extends State<_InteractorPane> {
   List<PendingApproval> _approvals = const [];
   List<PendingQuestion> _questions = const [];
   List<Map<String, dynamic>> _queue = const [];
+  InteractorStore? _subscribedTo;
+  final _subs = <StreamSubscription<dynamic>>[];
+  String? _selectedId;
 
   @override
   void initState() {
     super.initState();
+    widget.vm.addListener(_onVmChanged);
+    _connect();
+  }
+
+  void _onVmChanged() {
+    if (!mounted) return;
+    // interactor 换引用(测试注入/未来重装)→ 重挂订阅。
+    if (widget.vm.interactor != _subscribedTo) {
+      _connect();
+    }
+    // 会话切换 → 队列从快照重读。
+    if (widget.vm.selectedId != _selectedId) {
+      _selectedId = widget.vm.selectedId;
+      final queues = _subscribedTo?.currentQueues;
+      final sid = _selectedId;
+      setState(() => _queue = (sid != null && queues != null) ? (queues[sid] ?? const []) : const []);
+    }
+  }
+
+  void _connect() {
+    for (final s in _subs) {
+      s.cancel();
+    }
+    _subs.clear();
     final it = widget.vm.interactor;
+    _subscribedTo = it;
     if (it == null) return;
-    it.approvals.listen((l) {
-      if (mounted) setState(() => _approvals = l);
-    });
-    it.questions.listen((l) {
-      if (mounted) setState(() => _questions = l);
-    });
-    it.queues.listen((m) {
-      final sid = widget.vm.selectedId;
-      if (mounted && sid != null) {
-        setState(() => _queue = m[sid] ?? const []);
-      }
-    });
+    // 播种:current* 是最新收敛快照(广播流不重放,纯 listen 会漏)。
+    _approvals = it.currentApprovals;
+    _questions = it.currentQuestions;
+    _selectedId = widget.vm.selectedId;
+    final sid0 = _selectedId;
+    _queue = sid0 == null ? const [] : (it.currentQueues[sid0] ?? const []);
+    _subs.add(
+      it.approvals.listen((l) {
+        if (mounted) setState(() => _approvals = l);
+      }),
+    );
+    _subs.add(
+      it.questions.listen((l) {
+        if (mounted) setState(() => _questions = l);
+      }),
+    );
+    _subs.add(
+      it.queues.listen((m) {
+        final sid = widget.vm.selectedId;
+        if (mounted && sid != null) {
+          setState(() => _queue = m[sid] ?? const []);
+        }
+      }),
+    );
+  }
+
+  @override
+  void dispose() {
+    widget.vm.removeListener(_onVmChanged);
+    for (final s in _subs) {
+      s.cancel();
+    }
+    _subs.clear();
+    super.dispose();
+  }
+
+  /// 会话短标签:当前会话 → null(不显示);其它会话 → '会话·后 4 位'。
+  String? _labelFor(String sessionId) {
+    final selected = widget.vm.selectedId;
+    if (selected == sessionId) return null;
+    final tail = sessionId.length <= 4 ? sessionId : sessionId.substring(sessionId.length - 4);
+    return '会话 ·$tail';
   }
 
   @override
@@ -1212,11 +1309,17 @@ class _InteractorPaneState extends State<_InteractorPane> {
         ApprovalCards(
           approvals: _approvals,
           onRespond: (a, allow) => widget.onApproval?.call(a, allow),
+          sessionLabel: {
+            for (final a in _approvals)
+              if (_labelFor(a.sessionId) != null) a.rpcId: _labelFor(a.sessionId)!,
+          },
         ),
         for (final q in _questions)
           QuestionForm(
+            key: ValueKey('question-form-${q.rpcId}'),
             question: q,
-            onSubmit: (drafts) => widget.onQuestion?.call(q, drafts),
+            onSubmit: (drafts) => widget.onQuestion?.call(q, drafts) ?? Future.value(null),
+            sessionLabel: _labelFor(q.sessionId),
           ),
         QueueDock(items: _queue, onRemove: widget.onQueueRemove),
       ],
