@@ -1,24 +1,32 @@
-// 连接配置页(M4 LAN 形态,ADR-0004):
+// 连接配置页(M4 LAN 形态,ADR-0004;M6 增远程网关形态):
 // - 桌面同机:直接进主界面(loopback 3080,全功能)
 // - 手机 LAN:先输入主机地址(必须 --host <具体IP> + --trusted-host 启动的 dsh)
-// - 特权围栏:非 loopback 时按 host.describe 能力隐藏特权面(方法级 403 由服务端
-//   把关,客户端只做 UI 隐藏 —— DSH-PROTOCOL §6:可达性策略不是认证)
+// - 手机公网:经 dsh.example.com 网关(密码登录 + 设备令牌;M6)
+// - 特权围栏:非 loopback 且非已鉴权远程时,按 host.describe 能力隐藏特权面
+//   (方法级 403 由服务端把关,客户端只做 UI 隐藏 —— DSH-PROTOCOL §6:可达性策略不是认证)
 import 'package:flutter/material.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
-/// 特权面可见性:由 describe 结果决定(非 loopback 默认关)。
+/// 特权面可见性:loopback 或「经网关鉴权的远程」连接可见。
 class PrivilegeScope {
-  const PrivilegeScope({required this.isLoopback});
+  const PrivilegeScope({required this.isLoopback, this.authenticatedRemote = false});
   final bool isLoopback;
 
+  /// 远程网关形态(dsh-gateway 登录持有令牌):dsh 侧经隧道 + Host 改写
+  /// 呈现为 loopback,特权方法实际可用。
+  final bool authenticatedRemote;
+
   /// 特权方法 UI(settings/credentials/pickDirectory/openPath/agentPreset 写面)。
-  bool get showPrivilegedPanels => isLoopback;
+  bool get showPrivilegedPanels => isLoopback || authenticatedRemote;
 }
 
 /// 从连接目标推断 loopback(127.0.0.1/localhost/[::1])。
-PrivilegeScope scopeFor(Uri baseUri) {
+PrivilegeScope scopeFor(Uri baseUri, {bool authenticatedRemote = false}) {
   final h = baseUri.host.toLowerCase();
-  return PrivilegeScope(isLoopback: h == '127.0.0.1' || h == 'localhost' || h == '[::1]' || h == '::1');
+  return PrivilegeScope(
+    isLoopback: h == '127.0.0.1' || h == 'localhost' || h == '[::1]' || h == '::1',
+    authenticatedRemote: authenticatedRemote,
+  );
 }
 
 /// 连接配置对话框:输入 http(s)://host:port。

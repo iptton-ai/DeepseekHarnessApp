@@ -1,11 +1,16 @@
 // singleman — DSH 原生客户端(M2 最小聊天环)。
 // 桌面同机形态(ADR-0004):默认 loopback 3080,全功能。
+// M6 远程形态:持久化网关地址 + 设备令牌,经 dsh-gateway(example.com)
+// 鉴权中转接入;loopback 行为与旧版完全一致。
 import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/connection/credentials.dart';
+import 'package:singleman/connection/credentials_path.dart';
+import 'package:singleman/connection/remote_auth.dart';
 import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/command_store.dart';
 import 'package:singleman/sessions/directory_store.dart';
@@ -21,6 +26,7 @@ import 'package:singleman/sessions/workspace_store.dart';
 import 'package:singleman/ui/chat_screen.dart';
 import 'package:singleman/ui/chat_view_model.dart';
 import 'package:singleman/ui/connect_config.dart';
+import 'package:singleman/ui/remote_login.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 import 'package:singleman/ui/goal_skill_widgets.dart';
 import 'package:singleman/ui/model_picker.dart';
@@ -57,10 +63,8 @@ class _ScopeThemeChannel implements ThemeSettingsChannel {
   Future<void> load() => _scope.load();
 
   @override
-  Future<void> setPreference(String wireValue) => _scope.setField(
-        ['preference'],
-        wireValue,
-      );
+  Future<void> setPreference(String wireValue) =>
+      _scope.setField(['preference'], wireValue);
 
   @override
   Stream<void> get invalidations => _inv.stream;
@@ -73,10 +77,21 @@ class _ScopeThemeChannel implements ThemeSettingsChannel {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final base = Uri.parse(kDefaultBase);
+  final store = FileCredentialStore();
+  final plan = await planFromCredentials(store);
+  boot(plan: plan, credentialStore: store);
+}
 
-  final api = ApiClient(baseUri: base);
-  final connection = ConnectionController(baseUri: base);
+/// 按既定计划装配并启动整个应用(登录后换 base 会以新计划重跑)。
+void boot({
+  required ConnectionPlan plan,
+  required CredentialStore credentialStore,
+}) {
+  final authHeaders = plan.tokenProvider.authHeaders;
+  final base = plan.baseUri;
+
+  final api = ApiClient(baseUri: base, authHeaders: authHeaders);
+  final connection = ConnectionController(baseUri: base, authHeaders: authHeaders);
   final store = SessionStore(api: api, connection: connection);
   final interactor = InteractorStore(api: api, connection: connection);
   final goals = GoalStore(api: api);
@@ -86,119 +101,244 @@ Future<void> main() async {
   final jobs = JobStore(api: api, connection: connection);
   final subagents = SubagentStore(api: api, connection: connection);
   final settings = SettingsStore(api: api, connection: connection);
-  final scope = scopeFor(base);
+  final remote = !isLoopbackBase(base);
+  final scope = scopeFor(
+    base,
+    authenticatedRemote: remote && plan.tokenProvider.hasToken,
+  );
   // W2 集成:命令目录(斜杠菜单)/目录浏览(添加 workspace)/附件拉取(图片消息)。
-  final commands = CommandStore(api: api, connection: connection, skills: skills);
+  final commands = CommandStore(
+    api: api,
+    connection: connection,
+    skills: skills,
+  );
   final directory = DirectoryBrowserStore(api: api);
   final attachments = AttachmentFetcher(api: api);
   // W3 集成:消息反馈 + 主题(ui-theme 命名空间 CAS)。
   final feedback = FeedbackStore(api: api, connection: connection);
   final theme = ThemeStore(channel: _ScopeThemeChannel(settings, connection));
 
-  connection.start();
-  store.start();
-  workspaces.start();
+  void startConnected() {
+    connection.start();
+    store.start();
+    workspaces.start();
+  }
 
-  final vm = ChatViewModel(store: store, connection: connection)..interactor = interactor;
+  if (!plan.needsLogin) startConnected();
+
+  final vm = ChatViewModel(store: store, connection: connection)
+    ..interactor = interactor;
+
+  // 登录成功(首登或令牌失效后的重登):写凭证 → 令牌供给原地刷新。
+  // base 变化 → 整代重装(所有 store 持有旧 base 的 ApiClient)。
+  Future<void> onLoginDone(RemoteLoginSuccess success) async {
+    plan.tokenProvider.token = success.token;
+    await credentialStore.save(
+      StoredCredentials(baseUri: success.baseUri, token: success.token),
+    );
+    if (success.baseUri != base) {
+      boot(
+        plan: ConnectionPlan(
+          baseUri: success.baseUri,
+          tokenProvider: plan.tokenProvider,
+          needsLogin: false,
+        ),
+        credentialStore: credentialStore,
+      );
+      return;
+    }
+    if (plan.needsLogin) {
+      startConnected();
+    } else {
+      connection.resume();
+    }
+  }
 
   // W3-C:首用引导(三步;「不再提示」写 ui-onboarding 命名空间,失败本地兜底)。
-  final onboarding = WelcomeOnboardingController(_ScopeOnboardingChannel(settings, connection));
-  WidgetsBinding.instance.addPostFrameCallback((_) async {
-    final ctx = navigatorKey.currentContext;
-    if (ctx != null) {
-      await maybeShowWelcomeOnboarding(ctx, controller: onboarding);
-    }
-  });
-
-  runApp(SinglemanApp(
-    vm: vm,
-    onNewSession: () async {
-      try {
-        await store.createSession();
-      } on Object catch (e) {
-        debugPrint('createSession failed: ' + e.toString());
+  // 远程首登形态跳过(登录页已承担引导职责)。
+  if (!plan.needsLogin) {
+    final onboarding = WelcomeOnboardingController(
+      _ScopeOnboardingChannel(settings, connection),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        await maybeShowWelcomeOnboarding(ctx, controller: onboarding);
       }
-    },
-    actions: SessionActions(
-      onPickModel: () async {
-        final sid = vm.selectedId;
-        if (sid == null) return;
-        final ctx = navigatorKey.currentContext;
-        if (ctx == null) return;
-        final result = await showModelPicker(ctx, loadCatalog: () => store.sessionModels(sid));
-        if (result == null) return;
+    });
+  }
+
+  runApp(
+    _ConnectionGate(
+      connection: connection,
+      baseUri: base,
+      needsLogin: plan.needsLogin,
+      onLoginDone: onLoginDone,
+      child: SinglemanApp(
+      vm: vm,
+      onNewSession: () async {
         try {
-          await store.selectModel(sid,
+          await store.createSession();
+        } on Object catch (e) {
+          debugPrint('createSession failed: ' + e.toString());
+        }
+      },
+      actions: SessionActions(
+        onPickModel: () async {
+          final sid = vm.selectedId;
+          if (sid == null) return;
+          final ctx = navigatorKey.currentContext;
+          if (ctx == null) return;
+          final result = await showModelPicker(
+            ctx,
+            loadCatalog: () => store.sessionModels(sid),
+          );
+          if (result == null) return;
+          try {
+            await store.selectModel(
+              sid,
               provider: result.provider,
               model: result.model,
-              reasoningEffort: result.reasoningEffort);
-        } on Object catch (e) {
-          debugPrint('selectModel failed: ' + e.toString());
-        }
+              reasoningEffort: result.reasoningEffort,
+            );
+          } on Object catch (e) {
+            debugPrint('selectModel failed: ' + e.toString());
+          }
+        },
+        onRename: (sessionId, title) async {
+          try {
+            await store.renameSession(sessionId, title);
+          } on Object catch (e) {
+            debugPrint('rename failed: ' + e.toString());
+          }
+        },
+        onFork: (sessionId) async {
+          try {
+            await store.forkSession(sessionId);
+          } on Object catch (e) {
+            debugPrint('fork failed: ' + e.toString());
+          }
+        },
+        onExport: (sessionId) async {
+          try {
+            final path = Directory.systemTemp.path + '/' + sessionId + '.zip';
+            await store.exportSessionZip(sessionId, path);
+            debugPrint('exported to ' + path);
+          } on Object catch (e) {
+            debugPrint('export failed: ' + e.toString());
+          }
+        },
+        onPickSkill: (_) async {
+          final ctx = navigatorKey.currentContext;
+          if (ctx == null) return;
+          final name = await showSkillSheet(ctx, load: skills.list);
+          if (name == null) return;
+          final sid = vm.selectedId;
+          if (sid == null) return;
+          try {
+            await store.promptText(
+              sid,
+              skills.promptFor(name),
+              clientTimeZone: 'UTC',
+            );
+          } on Object catch (e) {
+            debugPrint('skill prompt failed: ' + e.toString());
+          }
+        },
+      ),
+      sender: (sessionId, text) async {
+        await store.promptText(sessionId, text, clientTimeZone: 'UTC');
       },
-      onRename: (sessionId, title) async {
+      steerSender: (sessionId, text, steer) async {
+        // W2:插话 = mode 'steer'(DSH-PROTOCOL §9);静止会话会收 steer-unavailable。
+        await store.promptText(
+          sessionId,
+          text,
+          mode: steer ? 'steer' : 'queue',
+          clientTimeZone: 'UTC',
+        );
+      },
+      workspaces: workspaces,
+      jobs: jobs,
+      subagents: subagents,
+      settings: settings,
+      scope: scope,
+      commands: commands,
+      directory: directory,
+      attachments: attachments,
+      feedback: feedback,
+      theme: theme,
+      onCancelSession: (sessionId) async {
         try {
-          await store.renameSession(sessionId, title);
+          await interactor.cancelSession(sessionId);
         } on Object catch (e) {
-          debugPrint('rename failed: ' + e.toString());
+          debugPrint('cancel failed: ' + e.toString());
         }
       },
-      onFork: (sessionId) async {
-        try {
-          await store.forkSession(sessionId);
-        } on Object catch (e) {
-          debugPrint('fork failed: ' + e.toString());
-        }
-      },
-      onExport: (sessionId) async {
-        try {
-          final path = Directory.systemTemp.path + '/' + sessionId + '.zip';
-          await store.exportSessionZip(sessionId, path);
-          debugPrint('exported to ' + path);
-        } on Object catch (e) {
-          debugPrint('export failed: ' + e.toString());
-        }
-      },
-      onPickSkill: (_) async {
-        final ctx = navigatorKey.currentContext;
-        if (ctx == null) return;
-        final name = await showSkillSheet(ctx, load: skills.list);
-        if (name == null) return;
-        final sid = vm.selectedId;
-        if (sid == null) return;
-        try {
-          await store.promptText(sid, skills.promptFor(name), clientTimeZone: 'UTC');
-        } on Object catch (e) {
-          debugPrint('skill prompt failed: ' + e.toString());
-        }
-      },
+      ),
     ),
-    sender: (sessionId, text) async {
-      await store.promptText(sessionId, text, clientTimeZone: 'UTC');
-    },
-    steerSender: (sessionId, text, steer) async {
-      // W2:插话 = mode 'steer'(DSH-PROTOCOL §9);静止会话会收 steer-unavailable。
-      await store.promptText(sessionId, text,
-          mode: steer ? 'steer' : 'queue', clientTimeZone: 'UTC');
-    },
-    workspaces: workspaces,
-    jobs: jobs,
-    subagents: subagents,
-    settings: settings,
-    scope: scope,
-    commands: commands,
-    directory: directory,
-    attachments: attachments,
-    feedback: feedback,
-    theme: theme,
-    onCancelSession: (sessionId) async {
-      try {
-        await interactor.cancelSession(sessionId);
-      } on Object catch (e) {
-        debugPrint('cancel failed: ' + e.toString());
+  );
+}
+
+/// 连接门卫(M6):首登/令牌失效时把登录页挡在主界面之前;
+/// authBlocked(网关 401)时主动拉起登录页,重登成功后 resume。
+class _ConnectionGate extends StatefulWidget {
+  const _ConnectionGate({
+    required this.connection,
+    required this.baseUri,
+    required this.needsLogin,
+    required this.onLoginDone,
+    required this.child,
+  });
+
+  final ConnectionController connection;
+  final Uri baseUri;
+  final bool needsLogin;
+  final Future<void> Function(RemoteLoginSuccess) onLoginDone;
+  final Widget child;
+
+  @override
+  State<_ConnectionGate> createState() => _ConnectionGateState();
+}
+
+class _ConnectionGateState extends State<_ConnectionGate> {
+  late bool _showLogin = widget.needsLogin;
+  StreamSubscription<ConnectionSnapshot>? _sub;
+  final _auth = RemoteAuthClient();
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = widget.connection.snapshots.listen((snap) {
+      if (snap.phase == ConnectionPhase.down &&
+          snap.failureReason == 'unauthorized' &&
+          !_showLogin &&
+          mounted) {
+        setState(() => _showLogin = true);
       }
-    },
-  ));
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _auth.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_showLogin) return widget.child;
+    return RemoteLoginPage(
+      auth: _auth,
+      initialUrl: widget.baseUri.toString(),
+      title: widget.needsLogin ? '连接到 DSH 网关' : '登录已失效,请重新登录',
+      onDone: (success) async {
+        await widget.onLoginDone(success);
+        if (mounted) setState(() => _showLogin = false);
+      },
+    );
+  }
 }
 
 class SinglemanApp extends StatelessWidget {
@@ -225,7 +365,8 @@ class SinglemanApp extends StatelessWidget {
   final ChatViewModel vm;
   final Future<void> Function() onNewSession;
   final Future<void> Function(String sessionId, String text) sender;
-  final Future<void> Function(String sessionId, String text, bool steer)? steerSender;
+  final Future<void> Function(String sessionId, String text, bool steer)?
+  steerSender;
   final SessionActions? actions;
   final WorkspaceStore? workspaces;
   final JobStore? jobs;
@@ -245,12 +386,8 @@ class SinglemanApp extends StatelessWidget {
       theme: theme,
       builder: (context, mode) => MaterialApp(
         title: 'singleman',
-        theme: ThemeData(colorSchemeSeed: const Color(0xFF2E5EAA), useMaterial3: true),
-        darkTheme: ThemeData(
-          colorSchemeSeed: const Color(0xFF2E5EAA),
-          brightness: Brightness.dark,
-          useMaterial3: true,
-        ),
+        theme: _buildAppTheme(Brightness.light),
+        darkTheme: _buildAppTheme(Brightness.dark),
         themeMode: mode,
         navigatorKey: navigatorKey,
         home: ChatSenderBinding(
@@ -276,6 +413,82 @@ class SinglemanApp extends StatelessWidget {
       ),
     );
   }
+}
+
+ThemeData _buildAppTheme(Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  final scheme = ColorScheme.fromSeed(
+    seedColor: const Color(0xFF5B5CE2),
+    brightness: brightness,
+    surface: dark ? const Color(0xFF12131B) : const Color(0xFFF7F8FC),
+  );
+  return ThemeData(
+    useMaterial3: true,
+    brightness: brightness,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: scheme.surface,
+    visualDensity: VisualDensity.standard,
+    appBarTheme: AppBarTheme(
+      backgroundColor: scheme.surface,
+      foregroundColor: scheme.onSurface,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      centerTitle: false,
+      titleTextStyle: TextStyle(
+        color: scheme.onSurface,
+        fontSize: 17,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -0.2,
+      ),
+    ),
+    cardTheme: CardThemeData(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      color: scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+    ),
+    dividerTheme: DividerThemeData(
+      color: scheme.outlineVariant.withValues(alpha: dark ? .35 : .55),
+      thickness: 1,
+      space: 1,
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: scheme.surfaceContainerHighest.withValues(
+        alpha: dark ? .45 : .62,
+      ),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(
+          color: scheme.outlineVariant.withValues(alpha: .7),
+        ),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(
+          color: scheme.outlineVariant.withValues(alpha: .7),
+        ),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: scheme.primary, width: 1.5),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    ),
+    listTileTheme: ListTileThemeData(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      minVerticalPadding: 6,
+      iconColor: scheme.onSurfaceVariant,
+      selectedColor: scheme.primary,
+      selectedTileColor: scheme.primary.withValues(alpha: dark ? .18 : .1),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        minimumSize: const Size(42, 42),
+        tapTargetSize: MaterialTapTargetSize.padded,
+      ),
+    ),
+  );
 }
 
 /// ui-onboarding 命名空间适配(welcomeNoticeVersion 读写;同 _ScopeThemeChannel 模式)。
