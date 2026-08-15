@@ -1,4 +1,4 @@
-# connection/ — 连接控制器(M1,接口已冻结)
+# connection/ — 连接控制器(M1,接口已冻结;M6 追加远程鉴权面)
 
 ## 不变式
 - 就绪握手 = 两条 WS 都打开 **且** host.describe 成功(DSH-PROTOCOL §2),缺一不可
@@ -7,12 +7,15 @@
 - rpcId 只由发起方 mint(UUIDv4);响应不回显 = 载波错误
 - 每个 POST 必须 Content-Type: application/json(否则 415)
 - 两级解析:RpcMessage 信封 → 业务 value(调用方 parse);畸形帧只上报不杀 socket
+- (M6)远程网关形态:HTTP 与两条 WS 全部携带 Authorization: Bearer;网关 401 =
+  鉴权拒绝(区别于网络故障)→ 停止退避重试等重登,不无限打点
 
-## 冻结接口(v1)
+## 冻结接口(v1 + M6 追加)
 
 ### ApiClient(上行)
 ```dart
-ApiClient({required Uri baseUri, Duration defaultTimeout = 30s})
+ApiClient({required Uri baseUri, Duration defaultTimeout = 30s,
+  Map<String,String> Function()? authHeaders /* M6,可空 */})
 Future<T> call<T>(String method, Map<String,dynamic> payload,
   {required T Function(Map<String,dynamic>) parse, Duration? timeout})
 ```
@@ -25,16 +28,28 @@ Future<T> call<T>(String method, Map<String,dynamic> payload,
 ```dart
 ConnectionController({required Uri baseUri,
   Duration initialBackoff = 300ms, Duration maxBackoff = 8s,
-  Duration probeTimeout = 10s})
+  Duration probeTimeout = 10s,
+  Map<String,String> Function()? authHeaders /* M6,可空 */})
 void start() / Future<void> dispose()
 Stream<ConnectionSnapshot> snapshots   // 代际快照(connecting→ready→down→…)
 Stream<MuxFrame> muxFrames             // 当前代际帧(广播,重连自动切换)
 Stream<HostFrame> hostFrames
 Stream<Object> protocolErrors          // 协议级畸形(不杀连接)
 ConnectionSnapshot? get current
+// M6:
+bool get authBlocked                   // 网关 401 后 true(重试已停)
+void resume()                          // 重登刷新令牌后恢复连接
 ```
 `ConnectionSnapshot{generation, phase, describe?, failureReason?}` — M2 在
-ready(尤其代际翻转)时重取 session.list + history。
+ready(尤其代际翻转)时重取 session.list + history;M6 起 `failureReason ==
+'unauthorized'` 表示鉴权被拒(配套 authBlocked)。
+
+### M6 远程鉴权面(其余文件)
+- `remote_auth.dart` — RemoteAuthenticator/RemoteAuthClient(密码登录)、
+  MutableTokenProvider(令牌原地刷新,HTTP/WS 共用)、planFromCredentials(启动决策)
+- `credentials.dart` — StoredCredentials/CredentialStore/MemoryCredentialStore
+  (**不得 import Flutter** —— bin 冒烟经 remote_auth 传递引入本文件)
+- `credentials_path.dart` — FileCredentialStore(path_provider,仅 main.dart 引)
 
 ## 故障注入测试(test/connection/)—— M1 验收
 - 拔线:unplug mux → 同代 down → 新代 ready(gen 递增)✅

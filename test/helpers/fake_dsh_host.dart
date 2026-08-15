@@ -1,4 +1,5 @@
 // 测试用假 DSH 主机:最小 describe + 双 WS 下行,可编程故障。
+// M6:可切换为「网关模式」——所有 /api 请求(含 WS upgrade)强制 Bearer 校验。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -9,6 +10,20 @@ class FakeDshHost {
   final Set<WebSocket> sockets;
   final muxSockets = <WebSocket>[];
   final hostSockets = <WebSocket>[];
+
+  /// 网关模式:非 null 时,Authorization 不等于此值的 /api 请求一律 401。
+  /// null = 直连形态(不校验)。
+  String? requireBearerToken;
+
+  /// 网关模式下收到的实际 Authorization 头(断言用)。
+  final seenAuthorizations = <String>[];
+
+  bool _authorized(HttpRequest req) {
+    if (requireBearerToken == null) return true;
+    final auth = req.headers.value('Authorization') ?? '';
+    seenAuthorizations.add(auth);
+    return auth == 'Bearer ' + requireBearerToken!;
+  }
 
   int describeCalls = 0;
   int listCalls = 0;
@@ -58,6 +73,13 @@ class FakeDshHost {
 
   Future<void> _handle(HttpRequest req) async {
     final path = req.uri.path;
+    // 网关模式:全部 /api(含 WS upgrade 与导出下载)统一 Bearer 校验。
+    if (path.startsWith('/api/') && !_authorized(req)) {
+      req.response.statusCode = 401;
+      req.response.write('{"error":"Unauthorized"}');
+      await req.response.close();
+      return;
+    }
     if (req.method == 'POST' && path == '/api/host.describe') {
       describeCalls += 1;
       final body = await utf8.decoder.bind(req).join();

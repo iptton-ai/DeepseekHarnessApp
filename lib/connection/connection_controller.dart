@@ -34,6 +34,14 @@ class ConnectionSnapshot {
       'ConnectionSnapshot(gen=$generation, $phase${failureReason == null ? '' : ', ' + failureReason!})';
 }
 
+/// 鉴权被拒(网关 401):令牌失效/被吊销,重试无意义,需重新登录。
+/// 由 [ConnectionController.authBlocked] 区别于普通网络故障。
+class AuthBlockedError implements Exception {
+  const AuthBlockedError();
+  @override
+  String toString() => 'AuthBlockedError(token rejected by gateway)';
+}
+
 class ConnectionController {
   ConnectionController({
     required Uri baseUri,
@@ -41,16 +49,21 @@ class ConnectionController {
     Duration maxBackoff = const Duration(seconds: 8),
     Duration probeTimeout = const Duration(seconds: 10),
     ApiClient? apiClient,
+    Map<String, String> Function()? authHeaders,
   })  : _baseUri = baseUri,
         _initialBackoff = initialBackoff,
         _maxBackoff = maxBackoff,
         _probeTimeout = probeTimeout,
-        apiClient = apiClient ?? ApiClient(baseUri: baseUri);
+        _authHeaders = authHeaders,
+        apiClient = apiClient ?? ApiClient(baseUri: baseUri, authHeaders: authHeaders);
 
   final Uri _baseUri;
   final Duration _initialBackoff;
   final Duration _maxBackoff;
   final Duration _probeTimeout;
+
+  /// 远程网关形态:两条 WS 携带 Authorization(M6)。
+  final Map<String, String> Function()? _authHeaders;
   final ApiClient apiClient;
   /// WS 专用直连 client(WebSocket.connect 不吃 ApiClient 的 HttpClient,
   /// 必须显式注入,否则系统代理会拦截 upgrade 请求)。
@@ -66,7 +79,20 @@ class ConnectionController {
   int _attempt = 0;
   bool _disposed = false;
   bool _started = false;
+  bool _authBlocked = false;
   _LiveGeneration? _live;
+
+  /// 网关已拒绝当前令牌(401)。为 true 时重试循环已停,
+  /// 重新登录(刷新令牌)后调 [resume] 恢复。
+  bool get authBlocked => _authBlocked;
+
+  /// 鉴权恢复后重新启动连接(与 start 等价;语义显式)。
+  void resume() {
+    if (_disposed) return;
+    _started = false;
+    _authBlocked = false;
+    start();
+  }
 
   /// 代际快照流(connecting → ready → down → connecting ...)。
   Stream<ConnectionSnapshot> get snapshots => _snapshots.stream;
@@ -122,15 +148,25 @@ class ConnectionController {
     final live = _LiveGeneration(gen, _muxFrames, _hostFrames, _protocolErrors, _addressedMux);
     _live = live;
 
-    final describeFuture = apiClient.call(
+    // 各腿错误旁路登记:eagerError 只抛先到的错,晚到的 401(如 describe)
+    // 会被吞掉 —— 网关 401 判定必须看全部腿。
+    final legErrors = <Object>[];
+    Future<T> tracked<T>(Future<T> f) => f.catchError((Object e) {
+          legErrors.add(e);
+          throw e;
+        });
+
+    final describeFuture = tracked(apiClient.call(
       RpcMethods.hostDescribe,
       <String, dynamic>{},
       parse: HostDescribeValue.fromJson,
       timeout: _probeTimeout,
-    );
+    ));
 
-    final muxFuture = Downlink.connect('mux', _muxUri, customClient: _wsClient);
-    final hostFuture = Downlink.connect('host', _hostUri, customClient: _wsClient);
+    final muxFuture = tracked(Downlink.connect('mux', _muxUri,
+        customClient: _wsClient, headers: _authHeaders?.call() ?? const {}));
+    final hostFuture = tracked(Downlink.connect('host', _hostUri,
+        customClient: _wsClient, headers: _authHeaders?.call() ?? const {}));
 
     try {
       final results = await Future.wait(<Future<Object>>[
@@ -152,16 +188,26 @@ class ConnectionController {
         phase: ConnectionPhase.ready,
         describe: describe,
       ));
-      live.watchInvalidations((reason) => _invalidate(gen, reason));
+      live.watchInvalidations((reason) => _invalidate(gen, reason, legErrors: const []));
     } catch (e) {
       // 握手失败:两条 socket 都可能开了一半,全部拆掉,退避重试。
       await live.teardown('handshake-failed: ' + e.toString());
-      _invalidate(gen, 'handshake failed: ' + e.toString());
+      _invalidate(gen, 'handshake failed: ' + e.toString(), legErrors: legErrors);
     }
   }
 
-  void _invalidate(int gen, String reason) {
+  void _invalidate(int gen, String reason, {List<Object> legErrors = const []}) {
     if (_disposed || _generation != gen) return;
+    // 网关 401:令牌被拒,退避重试没有意义 —— 停循环等重新登录。
+    if (_isAuthRejection(reason, legErrors)) {
+      _authBlocked = true;
+      _emit(ConnectionSnapshot(
+        generation: gen,
+        phase: ConnectionPhase.down,
+        failureReason: 'unauthorized',
+      ));
+      return;
+    }
     _emit(ConnectionSnapshot(
       generation: gen,
       phase: ConnectionPhase.down,
@@ -169,6 +215,15 @@ class ConnectionController {
     ));
     final backoff = _nextBackoff();
     Timer(backoff, _spawnGeneration);
+  }
+
+  /// 网关 401 判定:任一腿的 CarrierError 带 httpStatus 401,
+  /// 或失败串中含 401(WS 升级错误不携带状态码,由 describe 兜住)。
+  bool _isAuthRejection(String reason, List<Object> legErrors) {
+    for (final e in legErrors) {
+      if (e is CarrierError && e.httpStatus == 401) return true;
+    }
+    return reason.contains('http 401');
   }
 
   /// 测试钩子:模拟网络拔线 —— 主动关闭两条下行 socket(不通知服务端),

@@ -47,10 +47,17 @@ class Downlink {
   late final StreamSubscription<dynamic> _subscription;
   Object? _failure;
 
-  /// [customClient] 必须传入直连配置的 HttpClient(createDirectHttpClient): 
+  /// [customClient] 必须传入直连配置的 HttpClient(createDirectHttpClient):
   /// WebSocket.connect 默认自建 client,同样会被系统代理接管。
-  static Future<Downlink> connect(String name, Uri uri, {HttpClient? customClient}) async {
-    final ws = await WebSocket.connect(uri.toString(), customClient: customClient);
+  /// [headers] 远程网关形态携带 Authorization(dart:io WS 原生支持自定义头)。
+  static Future<Downlink> connect(
+    String name,
+    Uri uri, {
+    HttpClient? customClient,
+    Map<String, String> headers = const {},
+  }) async {
+    final ws = await WebSocket.connect(uri.toString(),
+        headers: headers, customClient: customClient);
     return Downlink._(name, ws);
   }
 

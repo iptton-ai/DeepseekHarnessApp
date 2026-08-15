@@ -60,14 +60,26 @@ class ApiClient {
     required Uri baseUri,
     Duration defaultTimeout = const Duration(seconds: 30),
     HttpClient? httpClient,
+    Map<String, String> Function()? authHeaders,
   })  : _baseUri = baseUri,
         _defaultTimeout = defaultTimeout,
+        _authHeaders = authHeaders,
         _httpClient = (httpClient ?? createDirectHttpClient());
 
   final Uri _baseUri;
   final Duration _defaultTimeout;
+
+  /// 远程网关形态:每次请求注入 Authorization: Bearer(M6)。
+  /// null/空 map = 直连形态,不加头。
+  final Map<String, String> Function()? _authHeaders;
   final HttpClient _httpClient;
   final Random _random = Random.secure();
+
+  void _applyAuth(HttpClientRequest req) {
+    final headers = _authHeaders?.call();
+    if (headers == null) return;
+    headers.forEach(req.headers.set);
+  }
 
   /// 单方法调用:信封 wrap → POST → 信封 unwrap → 业务 parse/折叠。
   ///
@@ -114,6 +126,7 @@ class ApiClient {
       throw CarrierError('connect refused: ${e.message}');
     }
     req.headers.contentType = ContentType.json;
+    _applyAuth(req);
     req.write(jsonEncode(<String, dynamic>{
       'type': 'client-request',
       'rpcId': rpcId,
@@ -173,6 +186,7 @@ class ApiClient {
       throw CarrierError('connect refused: ' + e.message);
     }
     req.headers.contentType = ContentType.json;
+    _applyAuth(req);
     req.write(jsonEncode(clientResponseEnvelope));
     final res = await req.close();
     final body = await res.transform(utf8.decoder).join();
@@ -205,6 +219,7 @@ class ApiClient {
     } on SocketException catch (e) {
       throw CarrierError('connect refused: ' + e.message);
     }
+    _applyAuth(req);
     final res = await req.close();
     if (res.statusCode != 200) {
       throw CarrierError('http ' + res.statusCode.toString(), httpStatus: res.statusCode);
