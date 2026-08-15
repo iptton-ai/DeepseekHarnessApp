@@ -13,14 +13,23 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('跟踪文件不含真实网关域名/IP/个人路径(开源防泄漏围栏)', () async {
-  // 拼接构造,避免本文件自身命中模式。
+  // 拆分构造:①本文件自身不连续含目标串;②拆分粒度必须保证任何「占位符
+  // 替换规则」的左侧无法 contiguous 命中任何碎片拼接 —— 第十七轮教训:
+  // filter-repo 的域名占位替换曾把首模式的真实域名字面量整个换掉,
+  // 围栏静默失明还误报占位符。
   final patterns = <String>[
-    'dsh.' + 'example.com',
+    'dsh.' + 'yltech' + '.store',
     'yltech' + '.store',
     '101.35.' + '129.159',
     '/Users/' + 'zxnap',
     'dshgw-' + 'password',
   ];
+  // 防自伤自检:模式若被批量替换腐化成占位符本身,必须炸,不许静默通过。
+  final neutralized = {'dsh.' + 'example' + '.com', 'example' + '.com'};
+  final corrupted = patterns.where(neutralized.contains).toList();
+  if (corrupted.isNotEmpty) {
+    fail('围栏模式被占位符替换腐化(历史重写/批量 sed 误伤?):$corrupted');
+  }
   final tracked = await Process.run('git', ['ls-files']);
   if (tracked.exitCode != 0) {
     throw StateError('git ls-files 失败(测试需在 git 仓库内运行)');
