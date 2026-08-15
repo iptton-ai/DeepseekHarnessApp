@@ -18,6 +18,9 @@ class _EmptyView implements SessionStoreView {
 
   @override
   Future<void> loadHistory(String sessionId) async {}
+
+  @override
+  Future<void> loadOlder(String sessionId) async {}
 }
 
 void main() {

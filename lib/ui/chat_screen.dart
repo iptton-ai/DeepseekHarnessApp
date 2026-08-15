@@ -521,7 +521,8 @@ class _MessagePane extends StatelessWidget {
                         sessionId: sid,
                         events: log.events,
                         eventStream: log.eventStream,
-                        hasOlder: false,
+                        onLoadOlder: () => vm.loadOlderSelected(),
+                        hasOlder: vm.hasOlderSelected,
                       ),
                     ));
                   },

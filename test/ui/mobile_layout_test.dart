@@ -58,6 +58,9 @@ class _FakeSessionView implements SessionStoreView {
   Future<void> loadHistory(String sessionId) async {
     loadCalls += 1;
   }
+
+  @override
+  Future<void> loadOlder(String sessionId) async {}
 }
 
 WorkspaceView _ws(String id, String title, List<String> sessionIds) =>

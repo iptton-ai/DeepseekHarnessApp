@@ -131,13 +131,9 @@ class ChatViewModel extends ChangeNotifier {
     _eventsSub?.cancel();
     final log = _store.logFor(sessionId);
     _rebuildFromLog(log);
-    _eventsSub = log.eventStream.listen((_) {
-      _rebuildFromLog(log);
-      _pruneEphemeral();
-      notifyListeners();
-    });
+    _eventsSub = log.eventStream.listen((_) => _scheduleRebuild(log));
     notifyListeners();
-    // 切换会话即拉历史(幂等:重复调用靠 seq 去重;日志非空时快速翻页补齐)。
+    // 切换会话即拉历史尾页(单页 50 条,首屏快;更早走 loadOlder)。
     _store.loadHistory(sessionId).then((_) {
       if (_selectedId == sessionId) {
         _rebuildFromLog(log);
@@ -149,6 +145,33 @@ class ChatViewModel extends ChangeNotifier {
         lastError = '历史加载失败: ' + e.toString();
         notifyListeners();
       }
+    });
+  }
+
+  /// 选中会话是否还有更早历史(轨迹页 hasOlder)。
+  bool get hasOlderSelected {
+    final id = _selectedId;
+    return id == null ? false : _store.logFor(id).hasOlder;
+  }
+
+  /// 向前补一页更早历史(轨迹页「加载更早」;装载后经日志流自动重算节点)。
+  Future<void> loadOlderSelected() async {
+    final id = _selectedId;
+    if (id == null) return;
+    await _store.loadOlder(id);
+  }
+
+  /// 批量广播合并:同一事件循环排空内多次日志变更只做一次全量重算
+  /// (extractNodes 是 O(n);逐帧重算会卡流式渲染,见 PROGRESS 性能回写)。
+  bool _rebuildScheduled = false;
+  void _scheduleRebuild(SessionLog log) {
+    if (_rebuildScheduled) return;
+    _rebuildScheduled = true;
+    scheduleMicrotask(() {
+      _rebuildScheduled = false;
+      _rebuildFromLog(log);
+      _pruneEphemeral();
+      notifyListeners();
     });
   }
 

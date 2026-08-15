@@ -32,6 +32,9 @@ class _FakeView implements SessionStoreView {
     historyLoads += 1;
   }
 
+  @override
+  Future<void> loadOlder(String sessionId) async {}
+
   void emit() {
     current = List.of(current);
     summariesController.add(current);

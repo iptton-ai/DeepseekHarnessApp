@@ -51,6 +51,34 @@ class SessionLog {
     return true;
   }
 
+  /// 批量追加(历史页装载用):seq 去重后**只发一次**广播。
+  /// 逐条 append 会造成 O(n²) 的全列表复制 + 每条一次全屏 rebuild
+  /// (启动装载风暴的根因之一,见 PROGRESS 性能回写)。
+  int appendAll(Iterable<SessionEvent> events) {
+    var added = 0;
+    for (final event in events) {
+      if (_seenSeqs.contains(event.seq)) continue;
+      _seenSeqs.add(event.seq);
+      var insertAt = _events.length;
+      while (insertAt > 0 && _events[insertAt - 1].seq > event.seq) {
+        insertAt -= 1;
+      }
+      _events.insert(insertAt, event);
+      added += 1;
+    }
+    if (added > 0 && !_eventsController.isClosed) {
+      _eventsController.add(List<SessionEvent>.unmodifiable(_events));
+    }
+    return added;
+  }
+
+  /// 已装载的最早 seq(loadOlder 的 beforeSeq 锚点)。
+  int? get earliestLoadedSeq =>
+      _events.isEmpty ? null : _events.first.seq;
+
+  /// 服务端还有更早的历史(loadHistory 尾页 hasMore 回填;loadOlder 消费)。
+  bool hasOlder = false;
+
   /// 投影单元覆盖:高 seq 赢,低 seq/同 seq 丢弃。
   void applyProjection(String key, dynamic value, int seq) {
     if (seq < projectionWatermark) return;
@@ -67,9 +95,12 @@ abstract class SessionStoreView {
   List<SessionSummary> get currentSummaries;
   SessionLog logFor(String sessionId);
 
-  /// 拉取(或翻页补齐)某会话的历史事件。VM 切换会话时调用;
+  /// 拉取某会话的历史尾页(默认 50 条;性能契约见实现)。
   /// 实现必须幂等安全(重复调用靠 seq 去重)。
   Future<void> loadHistory(String sessionId);
+
+  /// 向前补一页更早历史(无更早时 no-op)。
+  Future<void> loadOlder(String sessionId);
 }
 
 class SessionStore implements SessionStoreView {
@@ -156,43 +187,64 @@ class SessionStore implements SessionStoreView {
     }
   }
 
-  /// 装载历史尾页(beforeSeq 缺席 = 尾页,附带 projections 水位快照)。
-  /// hasMore=true 时继续向前翻页直至取完。
-  /// UI 切换会话的默认路径(接口窄视图)固定 50 条/页,防超大单响应。
+  /// 装载历史尾页(beforeSeq 缺席 = 最新 50 条,附带 projections 水位快照)。
+  ///
+  /// 性能契约(2026-08-15 回写):默认只拉一页 —— 启动/切会话必须首屏快;
+  /// 更早历史走 [loadOlder](轨迹页「加载更早」/未来聊天窗向上翻页)。
+  /// full: true 保留取全量语义(无 lib 内调用方,冒烟/调试用)。
   @override
-  Future<void> loadHistory(String sessionId, {int? maxMessages}) async {
+  Future<void> loadHistory(String sessionId,
+      {int? maxMessages, bool full = false}) async {
     maxMessages ??= 50;
-    var hasMore = true;
-    int? beforeSeq;
-    while (hasMore) {
-      final payload = <String, dynamic>{'sessionId': sessionId};
-      if (beforeSeq != null) payload['beforeSeq'] = beforeSeq;
-      if (maxMessages != null) payload['maxMessages'] = maxMessages;
-      final value = await api.call(
-        RpcMethods.sessionHistory,
-        payload,
-        parse: SessionHistoryValue.fromJson,
-      );
-      final log = logFor(sessionId);
-      for (final entry in value.events) {
-        log.append(entry.event);
+    final log = logFor(sessionId);
+    var hasMore = await _fetchPage(sessionId, log, maxMessages: maxMessages);
+    while (full && hasMore) {
+      final earliest = log.earliestLoadedSeq;
+      if (earliest == null) break;
+      hasMore = await _fetchPage(sessionId, log,
+          maxMessages: maxMessages, beforeSeq: earliest);
+    }
+  }
+
+  /// 向前补一页(轨迹「加载更早」;幂等:无更早时 no-op)。
+  @override
+  Future<void> loadOlder(String sessionId, {int? maxMessages}) async {
+    final log = logFor(sessionId);
+    final earliest = log.earliestLoadedSeq;
+    if (!log.hasOlder || earliest == null) return;
+    await _fetchPage(sessionId, log,
+        maxMessages: maxMessages ?? 50, beforeSeq: earliest);
+  }
+
+  /// 拉单页并落地;返回服务端 hasMore(空页视作无更多)。
+  Future<bool> _fetchPage(
+    String sessionId,
+    SessionLog log, {
+    required int maxMessages,
+    int? beforeSeq,
+  }) async {
+    final payload = <String, dynamic>{
+      'sessionId': sessionId,
+      'maxMessages': maxMessages,
+      if (beforeSeq != null) 'beforeSeq': beforeSeq,
+    };
+    final value = await api.call(
+      RpcMethods.sessionHistory,
+      payload,
+      parse: SessionHistoryValue.fromJson,
+    );
+    log.appendAll([for (final entry in value.events) entry.event]);
+    final block = value.projections;
+    if (block != null) {
+      for (final key in block.values.keys) {
+        log.projections[key] = block.values[key];
       }
-      final block = value.projections;
-      if (block != null) {
-        for (final key in block.values.keys) {
-          log.projections[key] = block.values[key];
-        }
-        if (block.asOfSeq > log.projectionWatermark) {
-          log.projectionWatermark = block.asOfSeq;
-        }
-      }
-      hasMore = value.hasMore;
-      if (hasMore && value.events.isNotEmpty) {
-        beforeSeq = value.events.first.event.seq;
-      } else {
-        hasMore = false;
+      if (block.asOfSeq > log.projectionWatermark) {
+        log.projectionWatermark = block.asOfSeq;
       }
     }
+    log.hasOlder = value.hasMore && value.events.isNotEmpty;
+    return log.hasOlder;
   }
 
   /// workspace.list(只读;M2 UI 的会话创建入口之一)。
