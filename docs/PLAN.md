@@ -83,6 +83,14 @@
 | 产出文件 | 轮尾文件行+行内提及链接 | 无 | 小(可后置) |
 | 主题 | light/dark/system + ui-theme.preference | 跟随系统 | 小 |
 
+### 波次结果(2026-08-15 收官)
+
+- **W1 ✅**(五切片):workspace 分组/jobs/subagent/settings·credentials·llm/会话流节点渲染;集成 = 四 store 接线 + ChatNodeList + <600dp 抽屉;122/122
+- **W2 ✅**(四切片):composer 升级(queue|steer/停止/按钮化)/目录 browse 单列下钻/图片渲染(LRU+灯箱)/命令菜单(commands|list 双层信封+预校验);集成 = UpgradeComposer 换装 + steerSender 链 + 页头命令按钮 + 添加工作区;203/203
+- **W3 ✅**(三切片):轨迹视图/产出文件+消息反馈(CAS)/主题(ui-theme)+onboarding;集成 = 轨迹入口/反馈行/_ThemeWrapper/首启引导;277/277 + 双活体冒烟
+- 测试累计 47→277;子代理累计 16 个(4 审计 + 5 W1 + 4 W2 + 3 W3);每片自建假主机+独立测试,集成轮主会话统一验收;**macOS release 43.9MB 构建通过**
+- 遗留(非阻塞,按需再开):image_picker 平台选图(pubspec 未加;附件发送 UI 暂缺入口,域层 promptWithImages 已备)、命令菜单输入框内联过滤(commandMenu slot 未注入,现为页头按钮)、真机 LAN 验证(需 --trusted-host 环境)
+
 ### 波次(每波并行切片,互不读对方代码;集成由主会话单独提交)
 
 - **W1(进行中)**:A workspace 分组域 | B jobs 域 | C subagent 域 | D settings/credentials/llm 域 | E 会话流节点渲染域(纯新增 event_nodes+node_widgets,不改既有文件)
