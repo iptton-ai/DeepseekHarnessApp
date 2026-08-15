@@ -8,7 +8,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/event_nodes.dart';
+import 'package:singleman/sessions/feedback_store.dart';
 import 'package:singleman/ui/attachment_views.dart';
+import 'package:singleman/ui/feedback_row.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 常显触控高度下限(移动可用性硬性要求)。
@@ -17,12 +19,15 @@ const double kNodeTapHeight = 44;
 /// 会话流节点列表:输入 [nodes],渲染整条消息流。
 /// 折叠状态由各节点自持(重放/重建时按位置稳定),本层不做外部记忆。
 class ChatNodeList extends StatelessWidget {
-  const ChatNodeList({super.key, required this.nodes, this.padding, this.sessionId, this.attachmentFetcher});
+  const ChatNodeList({super.key, required this.nodes, this.padding, this.sessionId, this.attachmentFetcher, this.feedbackStore});
   final List<ChatNode> nodes;
 
   /// 图片附件渲染(W2-C):会话 id + 共享 fetcher;缺席时图片引用不渲染。
   final String? sessionId;
   final AttachmentFetchView? attachmentFetcher;
+
+  /// 消息反馈(W3-B):注入时助手消息下缘挂 FeedbackActions;缺席不渲染。
+  final FeedbackStoreView? feedbackStore;
   final EdgeInsetsGeometry? padding;
 
   @override
@@ -40,7 +45,19 @@ class ChatNodeList extends StatelessWidget {
     final fetcher = (sid != null) ? attachmentFetcher : null;
     return switch (node) {
       ChatNodeUser() => _UserBubble(text: node.text, images: node.images, sessionId: sid, fetcher: fetcher),
-      ChatNodeAssistant() => _AssistantBubble(text: node.text, images: node.images, sessionId: sid, fetcher: fetcher),
+      ChatNodeAssistant() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _AssistantBubble(text: node.text, images: node.images, sessionId: sid, fetcher: fetcher),
+          // W3-B:助手消息反馈(👍/👎/备注;messageId 用事件 seq 字符串)。
+          if (sid != null && feedbackStore != null)
+            FeedbackActions(
+              store: feedbackStore!,
+              sessionId: sid,
+              messageId: node.seq.toString(),
+            ),
+        ],
+      ),
       ChatNodeThink() => _ThinkBlock(text: node.text),
       ChatNodeTool() => _ToolCard(node: node),
       ChatNodeTodo() => _TodoCard(node: node),

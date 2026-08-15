@@ -101,6 +101,10 @@ class ChatViewModel extends ChangeNotifier {
   List<SessionSummary> get sessions => List.unmodifiable(_sessions);
   String? get selectedId => _selectedId;
 
+  /// 选中会话的日志(轨迹页等直接消费;未选中为 null)。
+  SessionLog? get logForSelected =>
+      _selectedId == null ? null : _store.logFor(_selectedId!);
+
   /// 选中会话 running(host/session-status 折叠;composer 插话/停止态用)。
   bool get selectedRunning {
     final s = _sessions.where((s) => s.sessionId == _selectedId).toList();

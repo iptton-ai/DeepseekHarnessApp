@@ -14,11 +14,15 @@ import 'package:singleman/sessions/workspace_store.dart';
 import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/command_store.dart';
 import 'package:singleman/sessions/directory_store.dart';
+import 'package:singleman/sessions/feedback_store.dart';
 import 'package:singleman/ui/chat_view_model.dart';
 import 'package:singleman/ui/command_menu_sheet.dart';
 import 'package:singleman/ui/composer_pro.dart';
 import 'package:singleman/ui/directory_browse_sheet.dart';
 import 'package:singleman/ui/node_widgets.dart';
+import 'package:singleman/sessions/theme_store.dart';
+import 'package:singleman/ui/theme_mode_row.dart';
+import 'package:singleman/ui/trajectory_page.dart';
 import 'package:singleman/ui/connect_config.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 import 'package:singleman/ui/interactor_widgets.dart';
@@ -57,6 +61,8 @@ class ChatScreen extends StatelessWidget {
     this.commands,
     this.directory,
     this.attachments,
+    this.feedback,
+    this.theme,
     this.onCancelSession,
   });
   final ChatViewModel vm;
@@ -74,6 +80,10 @@ class ChatScreen extends StatelessWidget {
   final CommandStoreView? commands;
   final DirectoryBrowserStore? directory;
   final AttachmentFetchView? attachments;
+
+  // W3 域注入。
+  final FeedbackStoreView? feedback;
+  final ThemeStoreView? theme;
   final void Function(String sessionId)? onCancelSession;
 
   static const _kWideBreakpoint = 600.0;
@@ -86,13 +96,14 @@ class ChatScreen extends StatelessWidget {
         final sidebar = _Sidebar(
             vm: vm, onNewSession: onNewSession, actions: actions,
             workspaces: workspaces, settings: settings, scope: scope,
-            directory: directory);
+            directory: directory, theme: theme);
         final pane = _MessagePane(
                   vm: vm,
                   jobs: jobs,
                   subagents: subagents,
                   commands: commands,
                   attachments: attachments,
+                  feedback: feedback,
                   onCancelSession: onCancelSession,
                   onApproval: (a, allow) => vm.interactor?.respondApproval(
                       a.rpcId, a.sessionId, a.approvalId,
@@ -154,7 +165,7 @@ class ChatScreen extends StatelessWidget {
 }
 
 class _Sidebar extends StatefulWidget {
-  const _Sidebar({required this.vm, this.onNewSession, this.actions, this.workspaces, this.settings, this.scope, this.directory});
+  const _Sidebar({required this.vm, this.onNewSession, this.actions, this.workspaces, this.settings, this.scope, this.directory, this.theme});
   final ChatViewModel vm;
   final VoidCallback? onNewSession;
   final SessionActions? actions;
@@ -162,6 +173,7 @@ class _Sidebar extends StatefulWidget {
   final SettingsStoreView? settings;
   final PrivilegeScope? scope;
   final DirectoryBrowserStore? directory;
+  final ThemeStoreView? theme;
 
   @override
   State<_Sidebar> createState() => _SidebarState();
@@ -353,6 +365,12 @@ class _SidebarState extends State<_Sidebar> {
             const Divider(height: 1),
             SettingsEntryButton(scope: widget.scope!, store: widget.settings!),
           ],
+          // W3-C:主题三选一(非 loopback 也可用 —— theme 经 settings 通道但本机回退 system)。
+          if (widget.theme != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: ThemeModeRow(store: widget.theme!),
+            ),
         ],
       ),
     );
@@ -462,6 +480,7 @@ class _MessagePane extends StatelessWidget {
     this.subagents,
     this.commands,
     this.attachments,
+    this.feedback,
     this.onCancelSession,
   });
   final ChatViewModel vm;
@@ -469,6 +488,7 @@ class _MessagePane extends StatelessWidget {
   final SubagentStore? subagents;
   final CommandStoreView? commands;
   final AttachmentFetchView? attachments;
+  final FeedbackStoreView? feedback;
   final void Function(String sessionId)? onCancelSession;
   final void Function(PendingApproval a, bool allow)? onApproval;
   final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
@@ -489,6 +509,23 @@ class _MessagePane extends StatelessWidget {
                 if (subagents != null)
                   SubagentEntryButton(store: subagents!, parentSessionId: sid),
                 if (jobs != null) JobsTrigger(store: jobs!, sessionId: sid),
+                // W3:轨迹视图入口(整页推入;零新 RPC,纯 SessionLog 视图)。
+                IconButton(
+                  tooltip: '轨迹',
+                  icon: const Icon(Icons.timeline),
+                  onPressed: () {
+                    final log = vm.logForSelected;
+                    if (log == null) return;
+                    Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => TrajectoryPage(
+                        sessionId: sid,
+                        events: log.events,
+                        eventStream: log.eventStream,
+                        hasOlder: false,
+                      ),
+                    ));
+                  },
+                ),
                 if (commands != null)
                   IconButton(
                     tooltip: '命令',
@@ -516,7 +553,7 @@ class _MessagePane extends StatelessWidget {
           ),
         Expanded(
           child: vm.nodes.isNotEmpty
-              ? ChatNodeList(nodes: vm.nodes, sessionId: vm.selectedId, attachmentFetcher: attachments)
+              ? ChatNodeList(nodes: vm.nodes, sessionId: vm.selectedId, attachmentFetcher: attachments, feedbackStore: feedback)
               : (vm.bubbles.isEmpty
               ? const Center(child: Text('选择或创建一个会话开始对话'))
               : ListView.builder(
