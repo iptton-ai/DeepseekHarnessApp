@@ -6,6 +6,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/sessions/attachment_fetch.dart';
+import 'package:singleman/sessions/command_store.dart';
+import 'package:singleman/sessions/directory_store.dart';
 import 'package:singleman/sessions/goal_store.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/job_store.dart';
@@ -39,6 +42,10 @@ Future<void> main() async {
   final subagents = SubagentStore(api: api, connection: connection);
   final settings = SettingsStore(api: api, connection: connection);
   final scope = scopeFor(base);
+  // W2 集成:命令目录(斜杠菜单)/目录浏览(添加 workspace)/附件拉取(图片消息)。
+  final commands = CommandStore(api: api, connection: connection, skills: skills);
+  final directory = DirectoryBrowserStore(api: api);
+  final attachments = AttachmentFetcher(api: api);
 
   connection.start();
   store.start();
@@ -112,11 +119,26 @@ Future<void> main() async {
     sender: (sessionId, text) async {
       await store.promptText(sessionId, text, clientTimeZone: 'UTC');
     },
+    steerSender: (sessionId, text, steer) async {
+      // W2:插话 = mode 'steer'(DSH-PROTOCOL §9);静止会话会收 steer-unavailable。
+      await store.promptText(sessionId, text,
+          mode: steer ? 'steer' : 'queue', clientTimeZone: 'UTC');
+    },
     workspaces: workspaces,
     jobs: jobs,
     subagents: subagents,
     settings: settings,
     scope: scope,
+    commands: commands,
+    directory: directory,
+    attachments: attachments,
+    onCancelSession: (sessionId) async {
+      try {
+        await interactor.cancelSession(sessionId);
+      } on Object catch (e) {
+        debugPrint('cancel failed: ' + e.toString());
+      }
+    },
   ));
 }
 
@@ -126,23 +148,33 @@ class SinglemanApp extends StatelessWidget {
     required this.vm,
     required this.onNewSession,
     required this.sender,
+    this.steerSender,
     this.actions,
     this.workspaces,
     this.jobs,
     this.subagents,
     this.settings,
     this.scope,
+    this.commands,
+    this.directory,
+    this.attachments,
+    this.onCancelSession,
   });
 
   final ChatViewModel vm;
   final Future<void> Function() onNewSession;
   final Future<void> Function(String sessionId, String text) sender;
+  final Future<void> Function(String sessionId, String text, bool steer)? steerSender;
   final SessionActions? actions;
   final WorkspaceStore? workspaces;
   final JobStore? jobs;
   final SubagentStore? subagents;
   final SettingsStore? settings;
   final PrivilegeScope? scope;
+  final CommandStore? commands;
+  final DirectoryBrowserStore? directory;
+  final AttachmentFetcher? attachments;
+  final void Function(String sessionId)? onCancelSession;
 
   @override
   Widget build(BuildContext context) {
@@ -152,6 +184,7 @@ class SinglemanApp extends StatelessWidget {
       navigatorKey: navigatorKey,
       home: ChatSenderBinding(
         sender: sender,
+        steerSender: steerSender,
         child: ChatScreen(
           vm: vm,
           onNewSession: onNewSession,
@@ -161,6 +194,10 @@ class SinglemanApp extends StatelessWidget {
           subagents: subagents,
           settings: settings,
           scope: scope,
+          commands: commands,
+          directory: directory,
+          attachments: attachments,
+          onCancelSession: onCancelSession,
         ),
       ),
     );

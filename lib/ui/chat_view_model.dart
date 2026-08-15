@@ -100,6 +100,12 @@ class ChatViewModel extends ChangeNotifier {
 
   List<SessionSummary> get sessions => List.unmodifiable(_sessions);
   String? get selectedId => _selectedId;
+
+  /// 选中会话 running(host/session-status 折叠;composer 插话/停止态用)。
+  bool get selectedRunning {
+    final s = _sessions.where((s) => s.sessionId == _selectedId).toList();
+    return s.isNotEmpty && s.first.running;
+  }
   List<ChatBubble> get bubbles =>
       List.unmodifiable([..._bubbles, ..._ephemeral]);
 

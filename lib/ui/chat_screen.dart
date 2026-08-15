@@ -1,6 +1,7 @@
 // ChatScreen — 会话主界面(W1 集成:workspace 分组侧栏 + 节点流 + jobs/subagent 入口 + 设置;
 // <600dp 移动形态 = 抽屉侧栏,桌面 ≥600dp 保持双栏,见 PLAN「W1 集成规格」)。
 // 只消费注入的 store 视图与 ChatViewModel,不含任何 socket/HTTP 逻辑。
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:singleman/connection/connection_controller.dart';
@@ -10,7 +11,13 @@ import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/sessions/settings_store.dart';
 import 'package:singleman/sessions/subagent_store.dart';
 import 'package:singleman/sessions/workspace_store.dart';
+import 'package:singleman/sessions/attachment_fetch.dart';
+import 'package:singleman/sessions/command_store.dart';
+import 'package:singleman/sessions/directory_store.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/command_menu_sheet.dart';
+import 'package:singleman/ui/composer_pro.dart';
+import 'package:singleman/ui/directory_browse_sheet.dart';
 import 'package:singleman/ui/node_widgets.dart';
 import 'package:singleman/ui/connect_config.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
@@ -47,6 +54,10 @@ class ChatScreen extends StatelessWidget {
     this.subagents,
     this.settings,
     this.scope,
+    this.commands,
+    this.directory,
+    this.attachments,
+    this.onCancelSession,
   });
   final ChatViewModel vm;
   final VoidCallback? onNewSession;
@@ -59,6 +70,12 @@ class ChatScreen extends StatelessWidget {
   final SettingsStoreView? settings;
   final PrivilegeScope? scope;
 
+  // W2 域注入。
+  final CommandStoreView? commands;
+  final DirectoryBrowserStore? directory;
+  final AttachmentFetchView? attachments;
+  final void Function(String sessionId)? onCancelSession;
+
   static const _kWideBreakpoint = 600.0;
 
   @override
@@ -68,11 +85,14 @@ class ChatScreen extends StatelessWidget {
       builder: (context, _) {
         final sidebar = _Sidebar(
             vm: vm, onNewSession: onNewSession, actions: actions,
-            workspaces: workspaces, settings: settings, scope: scope);
+            workspaces: workspaces, settings: settings, scope: scope,
+            directory: directory);
         final pane = _MessagePane(
                   vm: vm,
                   jobs: jobs,
                   subagents: subagents,
+                  commands: commands,
+                  onCancelSession: onCancelSession,
                   onApproval: (a, allow) => vm.interactor?.respondApproval(
                       a.rpcId, a.sessionId, a.approvalId,
                       allow: allow),
@@ -133,13 +153,14 @@ class ChatScreen extends StatelessWidget {
 }
 
 class _Sidebar extends StatefulWidget {
-  const _Sidebar({required this.vm, this.onNewSession, this.actions, this.workspaces, this.settings, this.scope});
+  const _Sidebar({required this.vm, this.onNewSession, this.actions, this.workspaces, this.settings, this.scope, this.directory});
   final ChatViewModel vm;
   final VoidCallback? onNewSession;
   final SessionActions? actions;
   final WorkspaceStoreView? workspaces;
   final SettingsStoreView? settings;
   final PrivilegeScope? scope;
+  final DirectoryBrowserStore? directory;
 
   @override
   State<_Sidebar> createState() => _SidebarState();
@@ -231,6 +252,30 @@ class _SidebarState extends State<_Sidebar> {
             ),
           ),
           const Divider(height: 1),
+          // W2:添加工作区(应用内目录浏览,单列下钻;确认即 create)。
+          if (widget.workspaces != null && widget.directory != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(44),
+                ),
+                onPressed: () => showDirectoryBrowseSheet(
+                  context,
+                  store: widget.directory!,
+                  onConfirm: (path) async {
+                    // 确认即创建 workspace;失败 snackBar,成功由广播刷新浏览器。
+                    try {
+                      await widget.workspaces!.create(path);
+                    } on Object catch (e) {
+                      debugPrint('workspace create failed: ' + e.toString());
+                    }
+                  },
+                ),
+                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                label: const Text('添加工作区', style: TextStyle(fontSize: 13)),
+              ),
+            ),
           // W1:workspace 分组浏览器(注入存在时显示;替代纯扁平列表的分组语义)。
           if (widget.workspaces != null)
             Flexible(
@@ -414,10 +459,14 @@ class _MessagePane extends StatelessWidget {
     this.onQueueRemove,
     this.jobs,
     this.subagents,
+    this.commands,
+    this.onCancelSession,
   });
   final ChatViewModel vm;
   final JobStoreView? jobs;
   final SubagentStore? subagents;
+  final CommandStoreView? commands;
+  final void Function(String sessionId)? onCancelSession;
   final void Function(PendingApproval a, bool allow)? onApproval;
   final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
   final void Function(Map<String, dynamic> item)? onQueueRemove;
@@ -428,8 +477,8 @@ class _MessagePane extends StatelessWidget {
     final sid = vm.selectedId;
     return Column(
       children: [
-        // W1:页头动作区(subagent 目录入口 + 后台任务角标;无内容不渲染,自带语义)。
-        if (sid != null && (jobs != null || subagents != null))
+        // W1/W2:页头动作区(subagent 目录 + 后台任务 + 斜杠命令;无内容不渲染)。
+        if (sid != null && (jobs != null || subagents != null || commands != null))
           SizedBox(
             height: 48,
             child: Row(
@@ -437,6 +486,28 @@ class _MessagePane extends StatelessWidget {
                 if (subagents != null)
                   SubagentEntryButton(store: subagents!, parentSessionId: sid),
                 if (jobs != null) JobsTrigger(store: jobs!, sessionId: sid),
+                if (commands != null)
+                  IconButton(
+                    tooltip: '命令',
+                    icon: const Icon(Icons.terminal),
+                    onPressed: () async {
+                      await showCommandMenu(
+                        context,
+                        sessionId: sid,
+                        store: commands!,
+                        onPick: (line) async {
+                          // 命令 → execute(预校验在 store 内);skill → prompt。
+                          if (line.startsWith('/')) {
+                            try {
+                              await commands!.execute(sid, line);
+                            } on Object catch (e) {
+                              debugPrint('command failed: ' + e.toString());
+                            }
+                          }
+                        },
+                      );
+                    },
+                  ),
               ],
             ),
           ),
@@ -508,7 +579,28 @@ class _MessagePane extends StatelessWidget {
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(8),
-            child: _Composer(vm: vm, controller: controller),
+            child: UpgradeComposer(
+              running: vm.selectedRunning,
+              canSend: vm.canSend,
+              controller: controller,
+              onSend: (text, {required steer}) async {
+                final sid = vm.selectedId;
+                if (sid == null) return;
+                // 发送/插话同一回调;错误由组件内联映射展示。
+                final senderWithSteer = ChatSenderBinding.senderWithSteerOf(context);
+                vm.send(text, (id, t) => senderWithSteer(id, t, steer));
+              },
+              onCancel: (onCancelSession != null && vm.selectedId != null)
+                  ? () => onCancelSession!(vm.selectedId!)
+                  : null,
+              onCommandIntent: commands == null
+                  ? null
+                  : (query) {
+                      final sid = vm.selectedId;
+                      if (sid == null || query.isEmpty) return;
+                      // 占位回调:真正菜单经底部 sheet 打开(见页头动作区)。
+                    },
+            ),
           ),
         ),
       ],
@@ -625,14 +717,29 @@ class ChatSenderBinding extends InheritedWidget {
   const ChatSenderBinding({
     super.key,
     required this.sender,
+    this.steerSender,
     required super.child,
   });
   final Future<void> Function(String sessionId, String text) sender;
+
+  /// W2:带 steer 形态的发送(mode: 'steer' = 插话;默认 queue)。
+  /// 与旧 sender 并存:旧回调不知道 mode,插话走 [steerSender](可空)。
+  final Future<void> Function(String sessionId, String text, bool steer)? steerSender;
 
   static Future<void> Function(String, String) of(BuildContext context) {
     final w = context.dependOnInheritedWidgetOfExactType<ChatSenderBinding>();
     assert(w != null, 'ChatSenderBinding missing in tree');
     return w!.sender;
+  }
+
+  /// W2:composer 插话/发送统一入口;steerSender 缺席时插话退化为 queue。
+  static Future<void> Function(String sessionId, String text, bool steer) senderWithSteerOf(BuildContext context) {
+    final w = context.dependOnInheritedWidgetOfExactType<ChatSenderBinding>();
+    assert(w != null, 'ChatSenderBinding missing in tree');
+    final withSteer = w!.steerSender;
+    final plain = w.sender;
+    if (withSteer != null) return withSteer;
+    return (id, text, steer) => plain(id, text);
   }
 
   @override
