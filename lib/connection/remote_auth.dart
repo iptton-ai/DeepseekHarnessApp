@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/credentials.dart';
+import 'package:singleman/connection/pairing.dart';
 
 /// 令牌供给:ApiClient/Downlink 每次请求时读取,登录成功后原地刷新,
 /// 无需重建任何 store。
@@ -46,11 +47,14 @@ abstract class RemoteAuthenticator {
       {String device = 'singleman'});
 }
 
-class RemoteAuthClient implements RemoteAuthenticator {
+class RemoteAuthClient with PairingClientMixin implements RemoteAuthenticator {
   RemoteAuthClient({HttpClient? httpClient})
       : _httpClient = httpClient ?? createDirectHttpClient();
 
   final HttpClient _httpClient;
+
+  @override
+  HttpClient get pairingHttpClient => _httpClient;
 
   @override
   Future<RemoteLoginSuccess> login(
@@ -115,8 +119,14 @@ class ConnectionPlan {
   final bool needsLogin;
 }
 
-/// 默认网关地址(手机首启无凭证时的登录目标;用户可在登录页改)。
+/// 默认网关地址占位:真实网关地址不入仓库 —— 本机经环境变量
+/// SINGLEMAN_GATEWAY_BASE 覆盖,或在登录页手输一次(存凭证后不再问)。
 const kDefaultGatewayBase = 'https://dsh.example.com';
+
+/// 解析默认网关:环境变量 SINGLEMAN_GATEWAY_BASE 优先,缺省回落占位地址。
+Uri defaultGatewayBase() => Uri.tryParse(
+        Platform.environment['SINGLEMAN_GATEWAY_BASE'] ?? kDefaultGatewayBase) ??
+    Uri.parse(kDefaultGatewayBase);
 
 /// loopback 形态永远免鉴权(也避免误带令牌头)。
 bool isLoopbackBase(Uri base) {
@@ -144,7 +154,7 @@ Future<ConnectionPlan> planFromCredentials(
   if (stored == null) {
     if (mobileFirst) {
       return ConnectionPlan(
-        baseUri: Uri.parse(kDefaultGatewayBase),
+        baseUri: defaultGatewayBase(),
         tokenProvider: MutableTokenProvider(null),
         needsLogin: true,
       );

@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/sessions/event_nodes.dart';
 import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/sessions/event_text.dart';
 import 'package:singleman/ui/chat_screen.dart';

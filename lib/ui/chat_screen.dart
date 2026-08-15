@@ -1304,25 +1304,35 @@ class _InteractorPaneState extends State<_InteractorPane> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        ApprovalCards(
-          approvals: _approvals,
-          onRespond: (a, allow) => widget.onApproval?.call(a, allow),
-          sessionLabel: {
-            for (final a in _approvals)
-              if (_labelFor(a.sessionId) != null) a.rpcId: _labelFor(a.sessionId)!,
-          },
+    // 多卡并存时限高滚动:待办审批/问答/队列可能同时堆积,不限高会把
+    // composer 挤出屏幕(Column 溢出);限到视口 45%,内部滚动。
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * .45,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          children: [
+            ApprovalCards(
+              approvals: _approvals,
+              onRespond: (a, allow) => widget.onApproval?.call(a, allow),
+              sessionLabel: {
+                for (final a in _approvals)
+                  if (_labelFor(a.sessionId) != null) a.rpcId: _labelFor(a.sessionId)!,
+              },
+            ),
+            for (final q in _questions)
+              QuestionForm(
+                key: ValueKey('question-form-${q.rpcId}'),
+                question: q,
+                onSubmit: (drafts) =>
+                    widget.onQuestion?.call(q, drafts) ?? Future.value(null),
+                sessionLabel: _labelFor(q.sessionId),
+              ),
+            QueueDock(items: _queue, onRemove: widget.onQueueRemove),
+          ],
         ),
-        for (final q in _questions)
-          QuestionForm(
-            key: ValueKey('question-form-${q.rpcId}'),
-            question: q,
-            onSubmit: (drafts) => widget.onQuestion?.call(q, drafts) ?? Future.value(null),
-            sessionLabel: _labelFor(q.sessionId),
-          ),
-        QueueDock(items: _queue, onRemove: widget.onQueueRemove),
-      ],
+      ),
     );
   }
 }

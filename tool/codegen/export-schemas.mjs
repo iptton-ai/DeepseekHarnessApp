@@ -20,7 +20,7 @@ import path from 'node:path';
 
 const arg = process.argv.indexOf('--dsh-root');
 const DSH_ROOT = arg > 0 ? process.argv[arg + 1]
-  : '/Users/you/.local/lib/node_modules/@deepseek-ai/dsh';
+  : path.join(process.env.HOME ?? '', '.local/lib/node_modules/@deepseek-ai/dsh');
 const NM = path.join(DSH_ROOT, 'node_modules');
 const API_DIR = path.join(NM, '@deepseek-ai/dsh-host-apiproxy/lib/types/api');
 

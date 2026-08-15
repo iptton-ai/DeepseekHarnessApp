@@ -522,9 +522,11 @@ class _ToolCardState extends State<_ToolCard> {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+        // IntrinsicHeight:左缘色条 stretch 需要有界高度(列表纵向无界)。
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             Container(width: 3.5, color: color.withValues(alpha: .85)),
             Expanded(
               child: Column(
@@ -601,6 +603,7 @@ class _ToolCardState extends State<_ToolCard> {
               ),
             ),
           ],
+          ),
         ),
       ),
     );

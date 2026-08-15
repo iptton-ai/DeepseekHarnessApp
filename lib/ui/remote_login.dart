@@ -11,14 +11,16 @@ class RemoteLoginPage extends StatefulWidget {
     super.key,
     required this.auth,
     required this.onDone,
-    this.initialUrl = kDefaultGatewayBase,
+    this.initialUrl,
     this.title = '连接到 DSH 网关',
     this.popOnDone = true,
   });
 
   final RemoteAuthenticator auth;
   final RemoteLoginDone onDone;
-  final String initialUrl;
+
+  /// 初始地址;null 时用 [defaultGatewayBase](环境变量可覆盖)。
+  final String? initialUrl;
   final String title;
 
   /// 路由页默认登录成功后退出;根节点登录门卫由父级切换页面,不弹栈。
@@ -38,7 +40,8 @@ class _RemoteLoginPageState extends State<RemoteLoginPage> {
   @override
   void initState() {
     super.initState();
-    _url = TextEditingController(text: widget.initialUrl);
+    _url = TextEditingController(
+        text: widget.initialUrl ?? defaultGatewayBase().toString());
   }
 
   @override

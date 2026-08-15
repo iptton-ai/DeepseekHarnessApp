@@ -258,7 +258,12 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
 enum _ToolKind { none, call, result }
 
 /// 工具事件判定:优先信 view(主机渲染意图),其次按类型名猜测。
+/// code-dispatch 是 run_code 的内部派发子调用(父卡已汇总输出),不算工具卡。
 _ToolKind _toolKind(SessionEvent event, ToolEventView? view) {
+  if (event.type == 'tool/code-dispatch' ||
+      event.type == 'tool/code-dispatch-start') {
+    return _ToolKind.none;
+  }
   if (view is ToolEventViewCall) return _ToolKind.call;
   if (view is ToolEventViewResult) return _ToolKind.result;
   final type = event.type;
@@ -344,7 +349,8 @@ ChatNodeTool _buildToolResult(SessionEvent event, ToolEventView? view) {
   );
 }
 
-/// 合并配对:卡出现在 call 位置(seq=call),状态与输出取结果侧。
+/// 合并配对:卡出现在 call 位置(seq=call),状态与输出取结果侧;
+/// 摘要优先保留 call 侧(命令/参数预览比输出首行更稳定可读)。
 ChatNodeTool _mergeCallResult(ChatNodeTool call, ChatNodeTool result) =>
     ChatNodeTool(
       seq: call.seq,
@@ -354,7 +360,7 @@ ChatNodeTool _mergeCallResult(ChatNodeTool call, ChatNodeTool result) =>
       input: call.input,
       output: result.output,
       error: result.error,
-      summary: result.summary ?? call.summary,
+      summary: call.summary ?? result.summary,
       status: result.status,
       callSeq: call.callSeq ?? call.seq,
       resultSeq: result.resultSeq ?? result.seq,

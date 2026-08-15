@@ -12,6 +12,7 @@
 // - session/queue 是完整快照(整帧收敛,直接替换)
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
@@ -170,6 +171,11 @@ class InteractorStore {
     if (byId.length > q.questions.length) return 'unknown question id in answers';
     return null;
   }
+
+  /// 测试直喂(widget 测试在 fake-async zone 下真连接的 Timer 不走,
+  /// 用这个绕开 ConnectionController 直接喂帧;生产路径是 mux 订阅)。
+  @visibleForTesting
+  void debugFeed(AddressedMuxFrame addressed) => _onAddressedFrame(addressed);
 
   void _onAddressedFrame(AddressedMuxFrame addressed) {
     final frame = addressed.frame;

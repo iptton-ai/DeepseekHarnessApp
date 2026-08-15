@@ -4,7 +4,6 @@
 // remote_auth.dart 传递引入本文件(bin/*.dart 不沾 flutter,PROGRESS 坑表)。
 // 文件实现(带 path_provider)在 credentials_path.dart,仅 main.dart 引。
 import 'dart:convert';
-import 'dart:io';
 
 /// 持久化的连接配置。
 class StoredCredentials {

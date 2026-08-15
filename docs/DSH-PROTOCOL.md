@@ -145,7 +145,7 @@ messageFeedback 契约(源自 dsh-message-feedback/lib/types/types.d.ts + typert
 
 ## 8. 本机环境事实
 
-- dsh CLI:`/Users/you/.local/lib/node_modules/@deepseek-ai/dsh/`(全局安装,`dsh` 在 PATH)
+- dsh CLI:`~/.local/lib/node_modules/@deepseek-ai/dsh/`(全局安装,`dsh` 在 PATH)
 - 正在运行的 GUI:`http://127.0.0.1:3080`(可作为 conformance 测试的活体靶机;`host.describe` 无副作用可打)
 - DSH_HOME:`~/.dsh`(profiles:web 等)
 - 上游仓库:github.com/deepseek-ai/deepseek-harness(monorepo,契约在 `packages/host/apiproxy`)

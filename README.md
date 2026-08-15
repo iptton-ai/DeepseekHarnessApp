@@ -42,9 +42,10 @@ Flutter 客户端
 
 ## 关键外部事实
 
-- DSH 安装位置:`/Users/you/.local/lib/node_modules/@deepseek-ai/dsh/`(版本 0.1.0-rc.6)
+- DSH 安装位置:`~/.local/lib/node_modules/@deepseek-ai/dsh/`(版本 0.1.0-rc.6)
 - 本机 GUI:`http://127.0.0.1:3080`(dsh web 默认端口)
-- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟡(需 `--trusted-host`)/ 公网 🟢(M6 起:经 dsh.example.com 鉴权网关,见 `tool/remote/README.md` 与 docs/PLAN.md ADR-0006)
+- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟡(需 `--trusted-host`)/ 公网 🟢(M6 起:经自部署鉴权网关,见 docs/PLAN.md ADR-0006)
+- 远程网关为**自部署**(服务端不在本仓库):客户端默认地址是占位符,自用设备设环境变量 `SINGLEMAN_GATEWAY_BASE=https://<你的网关>` 或登录页手输一次(存凭证后不再问)
 
 ## 工作规则
 

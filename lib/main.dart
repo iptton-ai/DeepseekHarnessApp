@@ -1,6 +1,6 @@
 // singleman — DSH 原生客户端(M2 最小聊天环)。
 // 桌面同机形态(ADR-0004):默认 loopback 3080,全功能。
-// M6 远程形态:持久化网关地址 + 设备令牌,经 dsh-gateway(example.com)
+// M6 远程形态:持久化网关地址 + 设备令牌,经 dsh-gateway 前置网关
 // 鉴权中转接入;loopback 行为与旧版完全一致。
 import 'dart:async';
 import 'dart:io';
@@ -26,6 +26,7 @@ import 'package:singleman/sessions/workspace_store.dart';
 import 'package:singleman/ui/chat_screen.dart';
 import 'package:singleman/ui/chat_view_model.dart';
 import 'package:singleman/ui/connect_config.dart';
+import 'package:singleman/ui/pairing_page.dart';
 import 'package:singleman/ui/remote_login.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 import 'package:singleman/ui/goal_skill_widgets.dart';
@@ -185,7 +186,7 @@ void boot({
         builder: (_) => RemoteLoginPage(
           auth: gatewayAuth,
           initialUrl: isLoopbackBase(base)
-              ? kDefaultGatewayBase
+              ? defaultGatewayBase().toString()
               : base.toString(),
           title: '远程网关登录',
           onDone: onLoginDone,
@@ -372,16 +373,17 @@ class _ConnectionGateState extends State<_ConnectionGate> {
   Widget build(BuildContext context) {
     if (!_showLogin) return widget.child;
     // 首次移动端启动时门卫位于 SinglemanApp 外层,因此这里必须提供
-    // MaterialApp(Directionality/Theme/Navigator) 作为登录页根壳。
+    // MaterialApp(Directionality/Theme/Navigator) 作为配对页根壳。
+    // 配对为主渠道;PairingPage 内置「密码登录」兜底入口。
     return MaterialApp(
       title: 'singleman',
       theme: _buildAppTheme(Brightness.light),
       darkTheme: _buildAppTheme(Brightness.dark),
       themeMode: ThemeMode.system,
-      home: RemoteLoginPage(
+      home: PairingPage(
+        pairing: _auth,
         auth: _auth,
         initialUrl: widget.baseUri.toString(),
-        title: widget.needsLogin ? '连接到 DSH 网关' : '登录已失效,请重新登录',
         popOnDone: false,
         onDone: (success) async {
           await widget.onLoginDone(success);

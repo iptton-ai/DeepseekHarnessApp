@@ -120,14 +120,14 @@
 ### ADR-0006 公网形态:前置鉴权网关 + SSH 反向隧道(非 dsh 插件)
 
 **决策**:不在 dsh 进程内做鉴权(dsh-host-webserver 明示「无 TLS/auth,交给前置反向代理」;
-/api 路由由 client-connection 插件独占,进程内无插队点),改为在 example.com 服务器部署
-**dsh-gateway**(Rust/Axum,rusqlite,~5MB 常驻):
+/api 路由由 client-connection 插件独占,进程内无插队点),改为在自持服务器部署
+**dsh-gateway**(Rust/Axum,rusqlite,~5MB 常驻;服务端资料在本地 `server/`,不入库):
 
 ```
-手机 singleman ─https→ nginx(dsh.example.com, TLS) → dsh-gateway:8102(鉴权+中转)
-                                                        │ SSH 反向隧道(launchd 常驻)
-                                                        ▼
-                                              Mac dsh web(127.0.0.1:3080,零改动)
+手机 singleman ─https→ nginx(网关域名, TLS) → dsh-gateway:8102(鉴权+中转)
+                                              │ SSH 反向隧道(launchd 常驻)
+                                              ▼
+                                    Mac dsh web(127.0.0.1:3080,零改动)
 ```
 
 - **鉴权**:密码登录(argon2,每 IP 5 分钟 8 次限速)→ 30 天设备令牌(HS256 JWT,
@@ -149,13 +149,13 @@
   启动按凭证决策(loopback 直连 / 远程静默连 / 远程首登);401 → 停退避重试、拉起
   重登页,令牌原地刷新后 resume;PrivilegeScope 增 `authenticatedRemote`(远程鉴权
   形态特权面可见)
-- **部署 6 处**(example.com 仓库):workspace/build 脚本/.cnb.yml/nginx(子域+WS
-  upgrade+流式透传)/systemd/CLAUDE.md;密钥在服务器 `/etc/dsh-gateway.env`(不入 git)
+- **部署 6 处**(服务端仓库):workspace/build 脚本/.cnb.yml/nginx(子域+WS
+  upgrade+流式透传)/systemd/CLAUDE.md;密钥在服务器 env 文件(不入 git)
 
 **验收**:gateway 6 集成测试全绿(登录/401/吊销/Host 改写/WS echo/限速);客户端
 +23 测(401 停链/头注入/登录页/凭证/计划决策)全量 303 绿;活体 AUTH-SMOKE-PASS
 (真实登录 + 经网关真实 LLM 轮);服务器实测:healthz/login/describe/WS upgrade/401
-拒止全链路通过。DNS A 记录 dsh.example.com → 203.0.113.10 由用户在 DNSPod 添加。
+拒止全链路通过。DNS A 记录(网关域名 → 服务器 IP)由部署者自行添加(真实值见本地 `server/LOCAL.md`,不入库)。
 
 ### 遗留(按需)
 - 移动端令牌存储升级 flutter_secure_storage(现为沙箱内明文 JSON,可吊销兜底;
