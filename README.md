@@ -44,8 +44,19 @@ Flutter 客户端
 
 - DSH 安装位置:`~/.local/lib/node_modules/@deepseek-ai/dsh/`(版本 0.1.0-rc.6)
 - 本机 GUI:`http://127.0.0.1:3080`(dsh web 默认端口)
-- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟡(需 `--trusted-host`)/ 公网 🟢(M6 起:经自部署鉴权网关,见 docs/PLAN.md ADR-0006)
-- 远程网关为**自部署**(服务端不在本仓库):客户端默认地址是占位符,自用设备设环境变量 `SINGLEMAN_GATEWAY_BASE=https://<你的网关>` 或登录页手输一次(存凭证后不再问)
+- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟢(M6.2 起网关可跑 Mac 本机,免服务器)/ 公网 🟢(M6 起:经自部署鉴权网关,见 docs/PLAN.md ADR-0006)
+- 服务端网关:[dsh-mobile-gateway](https://github.com/iptton-ai/dsh-mobile-gateway),以 **git submodule 挂在 `gateway/`**(Mac 侧配对/隧道用 [dsh-mobile](https://github.com/iptton-ai/dsh-mobile) 插件);客户端默认地址是占位符,自用设备设环境变量 `SINGLEMAN_GATEWAY_BASE=https://<你的网关>` 或登录页手输一次(存凭证后不再问)
+
+## 开源使用者要装几件?(部署拓扑)
+
+| 拓扑 | 使用者要装的东西 | 适用 | 实测状态 |
+|---|---|---|---|
+| 桌面同机 | 浏览器打开 `127.0.0.1:3080` | Mac 前用 | dsh 自带 |
+| **LAN(同一 WiFi)** | ① App ② Mac 跑网关二进制(`DSH_GATEWAY_UPSTREAM=127.0.0.1:3080` + 端口白名单放宽 + claim 声明 3080;HTTP 明文) | 手机在家连 Mac | 2026-08-15 实测:配对/中转/WS 全通,零服务器零隧道 |
+| **公网自托管** | ① App ② Mac 隧道(dsh 插件行,随 `dsh web` 起)③ 自己服务器 `docker compose up`(网关 + TLS) | 出门连 Mac | 生产运行中 |
+| 公网托管(多用户网关) | ① App ② Mac 一行指向运营者网关 | 家人/小团队 | 需改造:Mac 侧独立身份(现为「有服务器 ssh 权限 = 能配对」);中转方可见全部流量,只适合互信小圈 |
+
+三件是结构性下限(Mac 在 NAT 后必须有出站桥;dsh 绑 loopback;无 P2P),但每件都被压缩到一条命令。
 
 ## 工作规则
 

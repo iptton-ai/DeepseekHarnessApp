@@ -195,6 +195,62 @@
 抢注 409/错码拒/单次消费/端口白名单/密码禁用/多上游路由)+ 客户端 9 例(客户端全流程/换码/
 假件 UI 四态);活体 PAIR-SMOKE-PASS(本地网关全链路含真 dsh 中转)。
 
+### ADR-0008 扫码即配对(M6.2,2026-08-15)
+
+**方向**:唯一摄像头在手机、唯一大屏在 Mac → **Mac 终端显示二维码 ← 手机扫**。
+协议零改动(start/poll/confirm 不变),扫码只是「邀请信息分发 + 主机码锚定」:
+
+```
+Mac pair.sh(无参)                     网关                          手机
+ 本地铸邀请码D'(10位)+主机码H(6位)
+ → /admin/pair/qr(经 ssh,公网不可达)
+   返回半块字符 QR(ANSI 黑字白底)      /pair 落地页(静态)          系统相机扫码 →
+   终端打印 QR <-- QR=URL#c=D'&h=H --  fragment 解析,一键复制 -->  落地页点「复制」
+ 每 3s 重试 claim(手机未 start 则 404)                                singleman 点扫码按钮粘贴 →
+                                                                      start{code=D'}(不换码)+ H 锚定
+                                                                      poll 见 offer(H 匹配→绿卡高亮)
+                                                                      点选 confirm → 令牌
+```
+
+**安全语义**:①D' 由 Mac 本地生成(非手机亮码),抄码抢注面不变(D' 存活唯一/30min 不可复用);
+②H 经 QR 预先送达手机,confirm 前比对从「人眼跨设备比对」升级为「锚定高亮 + 不匹配项须长按」;
+③落地页只经 fragment 传码(不进服务器日志),no-store;④秘密 S 始终只在手机内存(照旧)。
+
+**为何不做 dsh 插件形态**(开源「一行命令」诉求):网关是独立 Rust 服务,docker-compose +
+install.sh 已覆盖一行命令;dsh 插件(纯 JS 宿主进程)做不了 TCP 中转/WS 手写握手/SQLite 令牌库,
+能力边界不匹配;dshhub 上的 dsh-mobile-access 实为 Tailscale 向导(非鉴权网关),参照价值只在
+扫码 UX —— 已以零 App 依赖(系统相机 + Clipboard)方式吸收。
+
+测试:网关 +4(QR 定位图形解码/边界拒/落地页静态性/claim 404 语义)+ 客户端 +13(邀请解析/
+锚定高亮/长按逃生/无效剪贴板/外部码原样使用);生产 e2e:真实 QR → start → claim 重试 →
+confirm 发真 JWT,主机码锚定一致。
+
+### ADR-0009 Mac 侧配对插件化(2026-08-15 评估冻结,实现待做)
+
+**结论**:pair.sh 的能力**可以且值得**做成 dsh 插件(注意:与 ADR-0008 的「网关不做插件」
+不矛盾 —— 那条针对公网中转网关,这条针对 Mac 侧 UX)。四项能力全部有 API 实证:
+①铸码 = 纯 JS crypto;②调网关管理面 = 插件可 spawn 子进程(自有先例 dsh-tunnel.mjs
+spawn ssh);③展示 QR = `ws.register({kind:'prefix',path,handler})` 在 dsh web GUI 挂页
+(dsh-mobile-access 实证),浏览器 SVG 比终端半块字符清晰;④轮询/吊销 = 同页面 API。
+信任模型不变:插件 spawn 用户 ssh 调管理面,「能 claim = 有服务器 ssh 权限」照旧。
+
+**实现方向(用户已选)**:独立新仓库(与 singleman 平级,利于 dshhub 曝光);
+范围 = 配对页 + 设备管理 + **合并 dsh-tunnel**(Mac 侧收敛为一个插件,配置只剩
+target + publicUrl)。UX:dsh web GUI 内 /pair 页,点「配对手机」出 QR,手机扫码 →
+落地页复制 → App 粘贴,页面常驻已配对设备清单 + 一键吊销。网关零改动。
+
+**边界重申**:公网拓扑仍 3 件(插件只消除 Mac 侧脚本的心理负担,不消除结构);
+LAN 拓扑 2 件不变;网关不能进插件(能力边界:TCP 中转/WS 手写握手/SQLite)。
+
+pair.sh 在插件落地前继续作为兜底手输/扫码入口。
+
+**落地(第二十九轮,2026-08-15)**:新仓库 `dsh-mobile`(github.com/iptton-ai/dsh-mobile)实现并实测 ——
+`dsh plugin --profile web add <dir>` 安装(pnpm link),e2e 全链路过(插件页发起 → claim
+→ 手机 confirm 243B JWT → 令牌走插件隧道中转真 dsh → 页面 confirmed → 一键吊销)。
+实现坑沉淀:①profile hoisted 树中 product-subagents 的 zod peer 会解析到 3.23 导致
+ACP sdk `zod/v4` 导入炸(与是否装本插件无关),须在 pnpm-workspace.yaml `overrides: zod: ^4.1.0`;
+②prefix 路由 req.url 带 pagePath 前缀需自剥。生产 profile 已切 dsh-mobile 行。
+
 ### 遗留(按需)
 - 移动端令牌存储升级 flutter_secure_storage(现为沙箱内明文 JSON,可吊销兜底;
   OHOS fork 插件可用性未验证,故未引)
