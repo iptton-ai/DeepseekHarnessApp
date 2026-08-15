@@ -359,25 +359,35 @@ void main() {
     expect(subagentEntryTitle(v2.entries.single), 'child-nolabel');
   });
 
-  test('readTranscript 翻页装载 + seq 去重幂等', () async {
+  test('readTranscript 默认单页尾页;loadOlder 逐页向前;去重幂等', () async {
     host.childEvents['child-1'] = [
       eventOf(1, 'user/message'),
       eventOf(2, 'assistant/message'),
       eventOf(3, 'user/message'),
     ];
     await ready();
+    // 性能契约:默认只拉尾页(maxMessages 限制单页)。
     final events = await store.readTranscript('parent-1', 'child-1',
         mode: 'continuable', maxMessages: 2);
-    expect(events.map((e) => e.seq).toList(), [1, 2, 3]);
-    expect(host.historyRequests, hasLength(2)); // 翻页:尾页 + 前页
-    expect(host.historyRequests[0]['mode'], 'continuable');
-    expect(host.historyRequests[0]['beforeSeq'], isNull);
+    expect(events.map((e) => e.seq).toList(), [2, 3]); // 尾页
+    expect(host.historyRequests, hasLength(1)); // 不再自动翻页
+    expect(store.transcriptFor('child-1').hasOlder, isTrue);
 
-    // 幂等:重复装载不产生重复事件(靠 seq 去重)。
+    // loadOlder 向前补一页(beforeSeq=尾页最早 seq)。
+    await store.loadOlderTranscript('parent-1', 'child-1', mode: 'continuable');
+    expect(store.transcriptFor('child-1').events.map((e) => e.seq).toList(),
+        [1, 2, 3]);
+    expect(host.historyRequests.last['beforeSeq'], 2);
+    expect(store.transcriptFor('child-1').hasOlder, isFalse);
+
+    // 幂等:重复装载只重取尾页(事件靠 seq 去重);无更早 loadOlder no-op。
+    final before = host.historyRequests.length;
     final again = await store.readTranscript('parent-1', 'child-1',
         mode: 'continuable');
     expect(again.map((e) => e.seq).toList(), [1, 2, 3]);
-    expect(store.transcriptFor('child-1').events, hasLength(3));
+    expect(host.historyRequests.length, before + 1); // 尾页刷新一次
+    await store.loadOlderTranscript('parent-1', 'child-1', mode: 'continuable');
+    expect(host.historyRequests.length, before + 1); // no-op 零请求
   });
 
   test('mux session/event 帧增量追加到已缓存 transcript', () async {

@@ -56,7 +56,7 @@ class ChatViewModel extends ChangeNotifier {
       if (snap.phase == ConnectionPhase.ready) {
         describe = snap.describe;
         // 新代际:上一代的 view 渲染意图整体作废。
-        _viewsBySession.clear();
+        _viewsSelected.clear();
       }
       notifyListeners();
     });
@@ -64,8 +64,11 @@ class ChatViewModel extends ChangeNotifier {
       if (frame is MuxFrameSessionEvent &&
           frame.view != null &&
           frame.event.type.contains('tool')) {
-        _viewsBySession
-            .putIfAbsent(frame.sessionId, () => <int, ToolEventView>{})
+        // 懒注册:只收当前选中会话的渲染意图 —— 全会话收集会随
+        // 会话数无界增长(长连接下没人消费的会话也在堆积)。
+        final selected = _selectedId;
+        if (selected == null || frame.sessionId != selected) return;
+        _viewsSelected
             .putIfAbsent(frame.event.seq, () => frame.view!);
       }
     });
@@ -85,11 +88,10 @@ class ChatViewModel extends ChangeNotifier {
   final List<ChatBubble> _bubbles = <ChatBubble>[];
 
   // W1-E 集成:节点流(markdown/工具卡/think/todo/压缩/重试/错误)。
-  // view = 主机算好的渲染意图,只在实时 mux 帧携带(MuxFrameSessionEvent.view),
-  // 按 seq 收集、整代清空(重连后 view 语义可变,不跨代保留)。
+  // view = 主机算好的渲染意图,只在实时 mux 帧携带(MuxFrameSessionEvent.view)。
+  // 生命周期:仅选中会话(懒注册)、切换即弃(view 不跨会话/不跨代保留)。
   List<ChatNode> _nodes = <ChatNode>[];
-  final Map<String, Map<int, ToolEventView>> _viewsBySession =
-      <String, Map<int, ToolEventView>>{};
+  final Map<int, ToolEventView> _viewsSelected = <int, ToolEventView>{};
   StreamSubscription<MuxFrame>? _viewsSub;
   final List<ChatBubble> _ephemeral = <ChatBubble>[];
   ConnectionPhase phase = ConnectionPhase.connecting;
@@ -128,6 +130,7 @@ class ChatViewModel extends ChangeNotifier {
     _selectedId = sessionId;
     _bubbles.clear();
     _ephemeral.clear();
+    _viewsSelected.clear();
     _eventsSub?.cancel();
     final log = _store.logFor(sessionId);
     _rebuildFromLog(log);
@@ -188,7 +191,8 @@ class ChatViewModel extends ChangeNotifier {
       if (bubble != null) _bubbles.add(bubble);
     }
     // 节点流:结构化渲染(工具卡/think/todo/...);view 只对实时帧可用。
-    final views = _viewsBySession[log.sessionId];
+    // 选中会话才有收集的 view(懒注册);历史页(无实时帧)自然无 view。
+    final views = _selectedId == log.sessionId ? _viewsSelected : null;
     _nodes = extractNodes([
       for (final e in log.events)
         EventNodeInput(e, views?[e.seq]),

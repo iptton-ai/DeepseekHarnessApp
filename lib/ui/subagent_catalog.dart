@@ -306,6 +306,19 @@ class _SubagentTranscriptPageState extends State<SubagentTranscriptPage> {
     }
   }
 
+  Future<void> _loadOlder() async {
+    try {
+      await widget.store.loadOlderTranscript(
+        widget.parentSessionId,
+        widget.child.id,
+        mode: widget.child.mode as String,
+      );
+      if (mounted) setState(() => _error = null);
+    } on Object catch (e) {
+      if (mounted) setState(() => _error = subagentErrorMessage(e));
+    }
+  }
+
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _sending) return;
@@ -372,6 +385,18 @@ class _SubagentTranscriptPageState extends State<SubagentTranscriptPage> {
                 : ListView(
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     children: [
+                      // 更早历史分页(性能契约:打开只拉尾页,这里按需向前补)。
+                      if (_transcript.hasOlder)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                          child: OutlinedButton(
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(44),
+                            ),
+                            onPressed: _loadOlder,
+                            child: const Text('加载更早', style: TextStyle(fontSize: 13)),
+                          ),
+                        ),
                       if (_error != null)
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 12),

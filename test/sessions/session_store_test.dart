@@ -52,12 +52,16 @@ void main() {
     await host.stop();
   });
 
-  test('ready → refresh populates summaries and prewarms logs', () async {
+  test('ready → refresh populates summaries;日志懒注册(不预建)', () async {
     controller.start();
     store.start();
     final list = await store.summaries.first.timeout(const Duration(seconds: 3));
     expect(list, hasLength(1));
     expect(list.first.sessionId, 'session-s1');
+    // 懒注册契约:refresh 后没有预建任何日志;logFor 首次调用才登记。
+    final before = store.logFor('session-s2');
+    expect(before, isNotNull);
+    // 打开过的日志存在;未打开的会话帧被丢弃(不自动建日志)。
     expect(store.logFor('session-s1'), isNotNull);
   });
 

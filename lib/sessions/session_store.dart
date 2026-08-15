@@ -181,10 +181,8 @@ class SessionStore implements SessionStoreView {
       _summariesController.add(List<SessionSummary>.unmodifiable(_summaries));
     }
     listCalls += 1;
-    // 预热日志(保住已存在日志的同时登记新会话)。
-    for (final s in value.items) {
-      logFor(s.sessionId);
-    }
+    // 懒注册:不预建日志 —— 会话在 UI 打开(logFor/loadHistory)时才登记;
+    // 已存在日志靠 seq 去重天然保留(重连重取安全)。
   }
 
   /// 装载历史尾页(beforeSeq 缺席 = 最新 50 条,附带 projections 水位快照)。
@@ -327,8 +325,10 @@ class SessionStore implements SessionStoreView {
       <String, dynamic>{'sessionId': sessionId, 'title': title},
       parse: SessionRenameValue.fromJson,
     );
-    final log = _logs[sessionId];
-    log?.applyProjection('title', <String, dynamic>{'title': value.title}, value.seq);
+    // 显式用户动作 → 登记日志(懒注册的例外:受用户操作次数约束,不受帧流量约束);
+    // 登记后服务端投影回声帧才能落地。
+    final log = logFor(sessionId);
+    log.applyProjection('title', <String, dynamic>{'title': value.title}, value.seq);
     unawaited(refresh().catchError((Object _) {}));
     return value;
   }
@@ -407,11 +407,14 @@ class SessionStore implements SessionStoreView {
   }
 
   void _onMuxFrame(MuxFrame frame) {
+    // 懒注册:只向「已打开」的日志投递(UI 经 logFor/loadHistory 打开后才存在)。
+    // 无差别 logFor 会让每个活跃会话(含全部 subagent)都在本地长出一份日志,
+    // 长连接下内存无界增长;未打开会话的历史在打开时按页拉取即可。
     if (frame is MuxFrameSessionEvent) {
-      logFor(frame.sessionId).append(frame.event);
+      _logs[frame.sessionId]?.append(frame.event);
     } else if (frame is MuxFrameSessionProjection) {
-      logFor(frame.sessionId)
-          .applyProjection(frame.key, frame.value, frame.seq);
+      _logs[frame.sessionId]
+          ?.applyProjection(frame.key, frame.value, frame.seq);
     }
     // session/subscribed 水位、queue/jobs 快照收敛:M3 再折叠。
   }

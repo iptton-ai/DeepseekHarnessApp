@@ -37,6 +37,12 @@ class SubagentTranscript {
 
   int get lastSeq => _events.isEmpty ? -1 : _events.last.seq;
 
+  /// 已装载的最早 seq(loadOlder 的 beforeSeq 锚点)。
+  int? get earliestLoadedSeq => _events.isEmpty ? null : _events.first.seq;
+
+  /// 服务端还有更早历史(readTranscript 尾页 hasMore 回填)。
+  bool hasOlder = false;
+
   /// 按 seq 去重追加(翻页补齐 + mux 增量共用,重连重放安全)。
   bool append(SessionEvent event) {
     if (_seenSeqs.contains(event.seq)) return false;
@@ -50,6 +56,26 @@ class SubagentTranscript {
       _eventsController.add(List<SessionEvent>.unmodifiable(_events));
     }
     return true;
+  }
+
+  /// 批量追加(历史页装载):去重后只发一次广播
+  /// (对齐 SessionLog.appendAll 的性能契约)。
+  int appendAll(Iterable<SessionEvent> events) {
+    var added = 0;
+    for (final event in events) {
+      if (_seenSeqs.contains(event.seq)) continue;
+      _seenSeqs.add(event.seq);
+      var insertAt = _events.length;
+      while (insertAt > 0 && _events[insertAt - 1].seq > event.seq) {
+        insertAt -= 1;
+      }
+      _events.insert(insertAt, event);
+      added += 1;
+    }
+    if (added > 0 && !_eventsController.isClosed) {
+      _eventsController.add(List<SessionEvent>.unmodifiable(_events));
+    }
+    return added;
   }
 
   Future<void> dispose() => _eventsController.close();
@@ -143,39 +169,66 @@ class SubagentStore {
 
   /// 装载子会话 transcript(subagent.history 分页取完;重复调用幂等,靠 seq 去重)。
   /// [mode] 来自目录行('one-shot'|'continuable'),store 不假设。
+  /// 读子会话 transcript**尾页**(默认 50 条;性能契约对齐 loadHistory:
+  /// 打开即全量拉取是隐性 DoS,更早走 [loadOlderTranscript])。
   Future<List<SessionEvent>> readTranscript(
     String parentSessionId,
     String childSessionId, {
     required String mode,
     int? maxMessages,
+    bool full = false,
   }) async {
-    maxMessages ??= 50;
-    final transcript = transcriptFor(childSessionId);
-    var hasMore = true;
-    int? beforeSeq;
-    while (hasMore) {
-      final payload = <String, dynamic>{
-        'parentSessionId': parentSessionId,
-        'childSessionId': childSessionId,
-        'mode': mode,
-      };
-      if (beforeSeq != null) payload['beforeSeq'] = beforeSeq;
-      payload['maxMessages'] = maxMessages;
-      final value = await api.call(
-        RpcMethods.subagentHistory,
-        payload,
-        parse: SubagentHistoryValue.fromJson,
-      );
-      for (final entry in value.events) {
-        transcript.append(entry.event);
-      }
-      if (value.hasMore && value.events.isNotEmpty) {
-        beforeSeq = value.events.first.event.seq;
-      } else {
-        hasMore = false;
-      }
+    final transcript =
+        await _fetchTranscriptPage(parentSessionId, childSessionId, mode,
+            maxMessages: maxMessages ?? 50);
+    if (!full) return transcript.events;
+    while (transcript.hasOlder) {
+      final earliest = transcript.earliestLoadedSeq;
+      if (earliest == null) break;
+      await _fetchTranscriptPage(parentSessionId, childSessionId, mode,
+          maxMessages: maxMessages ?? 50, beforeSeq: earliest);
     }
     return transcript.events;
+  }
+
+  /// 向前补一页(幂等:无更早时 no-op)。
+  Future<List<SessionEvent>> loadOlderTranscript(
+    String parentSessionId,
+    String childSessionId, {
+    required String mode,
+    int? maxMessages,
+  }) async {
+    final transcript = transcriptFor(childSessionId);
+    final earliest = transcript.earliestLoadedSeq;
+    if (!transcript.hasOlder || earliest == null) return transcript.events;
+    return _fetchTranscriptPage(parentSessionId, childSessionId, mode,
+        maxMessages: maxMessages ?? 50, beforeSeq: earliest)
+        .then((_) => transcript.events);
+  }
+
+  Future<SubagentTranscript> _fetchTranscriptPage(
+    String parentSessionId,
+    String childSessionId,
+    String mode, {
+    required int maxMessages,
+    int? beforeSeq,
+  }) async {
+    final transcript = transcriptFor(childSessionId);
+    final payload = <String, dynamic>{
+      'parentSessionId': parentSessionId,
+      'childSessionId': childSessionId,
+      'mode': mode,
+      'maxMessages': maxMessages,
+      if (beforeSeq != null) 'beforeSeq': beforeSeq,
+    };
+    final value = await api.call(
+      RpcMethods.subagentHistory,
+      payload,
+      parse: SubagentHistoryValue.fromJson,
+    );
+    transcript.appendAll([for (final entry in value.events) entry.event]);
+    transcript.hasOlder = value.hasMore && value.events.isNotEmpty;
+    return transcript;
   }
 
   /// 续聊:mode 恒 'continuable';仅当目录行 parentAvailable==true 且 child 非
