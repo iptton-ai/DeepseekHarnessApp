@@ -593,19 +593,24 @@ class _ProviderEditPageState extends State<_ProviderEditPage> {
     IconData? icon,
     bool destructive = false,
   }) {
-    return SizedBox(
-      width: double.infinity,
-      child: FilledButton.icon(
-        style: FilledButton.styleFrom(
-          // 触控区 ≥44dp。
-          minimumSize: const Size(double.infinity, 48),
-          backgroundColor: destructive ? Theme.of(context).colorScheme.error : null,
-        ),
-        onPressed: onPressed,
-        icon: icon == null ? const SizedBox.shrink() : Icon(icon, size: 18),
-        label: Text(label),
-      ),
+    final style = FilledButton.styleFrom(
+      // 触控区 ≥44dp。
+      minimumSize: const Size(double.infinity, 48),
+      backgroundColor: destructive ? Theme.of(context).colorScheme.error : null,
     );
+    final child = icon == null
+        ? FilledButton(
+            style: style,
+            onPressed: onPressed,
+            child: Text(label),
+          )
+        : FilledButton.icon(
+            style: style,
+            onPressed: onPressed,
+            icon: Icon(icon, size: 18),
+            label: Text(label),
+          );
+    return SizedBox(width: double.infinity, child: child);
   }
 }
 

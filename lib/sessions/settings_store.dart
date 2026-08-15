@@ -258,10 +258,11 @@ class SettingsStore implements SettingsStoreView {
       parse: LlmProvidersValue.fromJson,
     );
     providersCalls += 1;
-    final refs = <String>{
-      for (final p in provs.providers)
-        if (_credentialRefOf(p, namespaces) != null) _credentialRefOf(p, namespaces)!,
-    };
+    final refs = <String>{};
+    for (final p in provs.providers) {
+      final ref = _credentialRefOf(p, namespaces);
+      if (ref != null) refs.add(ref);
+    }
     final creds = await api.call(
       RpcMethods.credentialsDescribe,
       <String, dynamic>{'refs': refs.toList()},

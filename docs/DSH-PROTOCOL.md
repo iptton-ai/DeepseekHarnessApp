@@ -138,6 +138,7 @@ messageFeedback 契约(源自 dsh-message-feedback/lib/types/types.d.ts + typert
 - commands/execute {agentId, line};commands/list {agentId} → CommandDescriptor[](name/description/input.hint)
 - 全部远程端点共同约束:subagent 会话作 agentId → agent-busy(ownership fence)
 - session.prompt mode 枚举(zod 实证):**'queue' | 'steer'**(steer=插话进运行中轮次;生成代码里 mode 是 Object,调用方须传字符串字面量)
+- 主题持久化:web 的 Appearance 行写 settings 命名空间 **"ui-theme"**(preference 键,light/dark/system)——theme/* 远程端点不可达,但 settings.mutate 可达,客户端主题同步走此通道(W3 用)
 
 ## 8. 本机环境事实
 
