@@ -219,7 +219,7 @@ class _PairingPageState extends State<PairingPage> {
         Icon(Icons.phonelink_ring_outlined, size: 44, color: scheme.primary),
         const SizedBox(height: 10),
         Text(
-          '与运行 DSH 的电脑配对\nMac 上执行 ./tool/remote/pair.sh <配对码>',
+          '与运行 DSH 的电脑配对\nMac 上执行 pair.sh <配对码>(见 server/remote/)',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall,
         ),
