@@ -62,6 +62,51 @@
 - [x] 手机 LAN 形态(连接配置页 + PrivilegeScope 按 loopback 隐藏特权面;真机验证待做)
 - workspace 管理:暂缓(桌面会话列表已覆盖主场景,按需再开)
 
+## M5 web profile 全功能复刻(2026-08-15 起)
+
+> 输入:四份并行审计(docs/audit/{conversation,settings-system,orchestration,sidebar-layout}.md),
+> 对照 M0–M4 已有面得出差距。验收口径:单测/widget 测试 + 活体冒烟 + 移动可用性(<1024 抽屉/底部 sheet/44dp 触控)。
+
+### 差距分析(按域)
+
+| 域 | web profile 有 | 本项目现状 | 差距 |
+|---|---|---|---|
+| 会话流保真 | think 折叠行/工具卡(ToolEventView)/todo 计划 dock/压缩检查点/重试行/分支/统计行 | 纯文本气泡(event_text) | **大** |
+| composer | steer 插话/权限 chip/ContextMeter/模型座/加号命令入口/busyEnter | 队列模式发送+取消 | **大** |
+| workspace | 分组侧栏/增删改排序/归档/目录选择(native+browse)/搜索防抖 | session.list 扁平列表+简单过滤 | **大** |
+| subagent | 目录树/token 用量/只读 transcript/续聊/中断 | 无 | **大** |
+| jobs | session/jobs 弹层+角标+耗时表 | 无 | 中 |
+| settings/credentials/llm | 提供方管理/密钥/发现模型/插件配置/revision CAS | 无(PROGRESS 下一步 #1) | **大**(loopback 门控) |
+| 命令体系 | / 菜单(fuzzy)/风险确认/三派发 | skill 底部弹层(等价最小面) | 中 |
+| 轨迹视图 | 三列 ledger+时间条+检查器 | 无 | 中(可后置) |
+| 消息反馈 | like/dislike+备注(CAS) | 无 | 小(需核 RPC 可达性) |
+| 产出文件 | 轮尾文件行+行内提及链接 | 无 | 小(可后置) |
+| 主题 | light/dark/system + ui-theme.preference | 跟随系统 | 小 |
+
+### 波次(每波并行切片,互不读对方代码;集成由主会话单独提交)
+
+- **W1(进行中)**:A workspace 分组域 | B jobs 域 | C subagent 域 | D settings/credentials/llm 域 | E 会话流节点渲染域(纯新增 event_nodes+node_widgets,不改既有文件)
+- **W2**:composer 升级(steer/权限 chip/ContextMeter/模型座重排) + 目录 browse 对话框 + 图片消息渲染(画廊/灯箱) + / 命令菜单统一(skill+命令+plan chip) + 集成波
+- **W3**:轨迹视图 + 产出文件行 + 消息反馈(先核 messageFeedback RPC 对 /api 是否可达) + 主题设置 + onboarding + 活体冒烟扩展 + release 构建
+- 移动可用性横切要求:所有新列表行 ≥44dp;弹层默认底部 sheet(宽屏才用居中 modal);hover 交互→常显按钮或长按;宽内容(diff/终端/轨迹)横向滚动+全屏查看两级降级;搜索/目录选择全屏化;settings/credentials/host.* 特权面按 PrivilegeScope(loopback)门控。
+
+### W1 集成规格(2026-08-15 冻结,待切片全绿后执行)
+
+接线点(全部在既有文件,改动集中在 main.dart + chat_screen.dart):
+1. **main.dart**:构造 WorkspaceStore/JobStore/SubagentStore/SettingsStore(共用 api+connection),传给 ChatScreen 新参数;SettingsEntryButton 注入侧栏底部(PrivilegeScope 门控已在组件内)。
+2. **chat_screen.dart**:
+   - _Sidebar 顶部加 WorkspaceBrowser(注入 store+回调:选中会话/新建(带 workspaceId)/重命名/fork/归档);原扁平 session 列表保留为「全部会话」段(过渡期并存)。
+   - _MessagePane 页头(AppBar 位)加 SubagentEntryButton + JobsTrigger(均无内容不渲染,自带此语义)。
+   - _MessagePane 消息流切换:ChatNodeList(event_nodes+node_widgets)替换 event_text 气泡;ChatViewModel 增加 nodes 计算(或由 main 层用 store.logFor(id).eventStream 直接驱动,见 3)。
+   - view 映射:main 层订阅 connection.muxFrames 收集 Map<sessionId, Map<seq, ToolEventView>>,连同 events 一起喂 ChatNode 提取器。
+3. **ChatViewModel**:加 selectedLog 流已存在(logFor);新增 nodesView 流 = eventStream × viewMap → List<ChatNode>(combineLatest 语义)。为控改动量,也可在 _MessagePane 内 StatefulWidget 自订阅(集成时择一,优先 VM 层,便于测试)。
+4. **移动布局**:<600dp 时 Scaffold 改 ScaffoldMessenger+Drawer:侧栏整体进 Drawer(WorkspaceBrowser+会话列表);桌面 ≥600dp 保持 Row。判定用 LayoutBuilder。Jobs/subagent 弹层组件已是底部 sheet,无需改。
+5. **验收**:flutter test 全绿(旧 47 + 新 ~45);widget 测试补 1 个「窄屏打开抽屉可见 workspace 分组」;活体:dart run bin/live_features_smoke.dart 仍绿(回归);bin/ 扩展见 W3。
+
+### 新增任务模板附加项(移动验收)
+
+6. **移动可用性验收**:切片 UI 必须附窄屏(360dp)widget 测试或说明为何域层无 UI。
+
 ## 任务模板(五件套)
 
 任何任务(给人或 agent)必须包含:

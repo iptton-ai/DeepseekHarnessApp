@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:singleman/connection/connection_controller.dart';
+import 'package:singleman/sessions/event_nodes.dart';
 import 'package:singleman/sessions/event_text.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/session_store.dart';
@@ -52,8 +53,21 @@ class ChatViewModel extends ChangeNotifier {
       phase = snap.phase;
       generation = snap.generation;
       failureReason = snap.failureReason;
-      if (snap.phase == ConnectionPhase.ready) describe = snap.describe;
+      if (snap.phase == ConnectionPhase.ready) {
+        describe = snap.describe;
+        // 新代际:上一代的 view 渲染意图整体作废。
+        _viewsBySession.clear();
+      }
       notifyListeners();
+    });
+    _viewsSub = _connection?.muxFrames.listen((frame) {
+      if (frame is MuxFrameSessionEvent &&
+          frame.view != null &&
+          frame.event.type.contains('tool')) {
+        _viewsBySession
+            .putIfAbsent(frame.sessionId, () => <int, ToolEventView>{})
+            .putIfAbsent(frame.event.seq, () => frame.view!);
+      }
     });
   }
 
@@ -62,9 +76,21 @@ class ChatViewModel extends ChangeNotifier {
   StreamSubscription<List<SessionSummary>>? _summariesSub;
   StreamSubscription<List<SessionEvent>>? _eventsSub;
 
+  /// 会话摘要的透传(W1 集成:WorkspaceBrowser 直接吃 store 流,
+  /// 不经过 VM 的拷贝,避免双份状态)。
+  Stream<List<SessionSummary>> get summaries => _store.summaries;
+
   List<SessionSummary> _sessions = <SessionSummary>[];
   String? _selectedId;
   final List<ChatBubble> _bubbles = <ChatBubble>[];
+
+  // W1-E 集成:节点流(markdown/工具卡/think/todo/压缩/重试/错误)。
+  // view = 主机算好的渲染意图,只在实时 mux 帧携带(MuxFrameSessionEvent.view),
+  // 按 seq 收集、整代清空(重连后 view 语义可变,不跨代保留)。
+  List<ChatNode> _nodes = <ChatNode>[];
+  final Map<String, Map<int, ToolEventView>> _viewsBySession =
+      <String, Map<int, ToolEventView>>{};
+  StreamSubscription<MuxFrame>? _viewsSub;
   final List<ChatBubble> _ephemeral = <ChatBubble>[];
   ConnectionPhase phase = ConnectionPhase.connecting;
   int generation = 0;
@@ -76,6 +102,9 @@ class ChatViewModel extends ChangeNotifier {
   String? get selectedId => _selectedId;
   List<ChatBubble> get bubbles =>
       List.unmodifiable([..._bubbles, ..._ephemeral]);
+
+  /// 当前会话的节点流(空日志为空列表;UI 优先用它,bubbles 保留为兜底)。
+  List<ChatNode> get nodes => List.unmodifiable(_nodes);
 
   // M3 交互帧(interactor 可为 null:纯聊天场景/测试)。
   InteractorStore? interactor;
@@ -125,6 +154,12 @@ class ChatViewModel extends ChangeNotifier {
       final bubble = _bubbleFor(event);
       if (bubble != null) _bubbles.add(bubble);
     }
+    // 节点流:结构化渲染(工具卡/think/todo/...);view 只对实时帧可用。
+    final views = _viewsBySession[log.sessionId];
+    _nodes = extractNodes([
+      for (final e in log.events)
+        EventNodeInput(e, views?[e.seq]),
+    ]);
   }
 
   ChatBubble? _bubbleFor(SessionEvent event) {
@@ -176,6 +211,7 @@ class ChatViewModel extends ChangeNotifier {
   void dispose() {
     _summariesSub?.cancel();
     _eventsSub?.cancel();
+    _viewsSub?.cancel();
     super.dispose();
   }
 }

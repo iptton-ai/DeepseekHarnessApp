@@ -97,6 +97,48 @@ HostFrame:会话创建/销毁(`host/session-added`)、运行状态(`host/session
 - 错误处理按 `RpcErrorDetailsMap` 建全量 code→Dart sealed class;`internal` 是兜底
 - 请求体上限默认 160 MiB(为 100 MiB 聚合图片限额的 base64 膨胀留余量)
 
+## 9. 远程端点(typert gateway,2026-08-15 活体探针验证)
+
+除核心 52 方法(点号命名)外,/api 上还挂着 typert gateway 认领的**远程端点(斜杠命名)**,
+信封同 ClientRequest,但 payload 必须为 {args: {...}}(恰好一个 args 字段;字段须匹配严格描述符,
+错误消息会点名缺失字段,如 missing "agentId")。本部署(rc.6)实测可达:
+
+- pluginInventory/list(空 args 即可 → 插件清单 entries:entryId/moduleName/enabled/fiberPhase)
+- commands/list(需 agentId)、commands/execute
+- messageFeedback/list(需 request 对象)、messageFeedback/put(及推测 /delete)
+- goals/create|edit|pause|resume|clear(CAS ref 版;与核心 goal.* 点号方法并存,均可走)
+
+实测**不可达**(not found):theme/*、workspaces/*、permissions/*、command.list(注意:
+audit 里的 command.list 是猜错的名字,正确为 commands/list)。
+
+转发事件(Host 帧 host/remote-event 的 event 字符串,词汇来自 API_REMOTE_FORWARDED_EVENTS,
+归属包 dsh-agent-presets/dsh-commands/dsh-credentials/dsh-llm/dsh-settings):至少含
+settings/document-updated、credentials/updated、llm/adapters-updated、commands/change、
+agent-preset/selected;重连不重放,消费端自行重拉。
+
+验证:curl 探针 + @deepseek-ai/dsh-api-remotes/README.zh.md(挂载面)、dsh-api-gateway(args 约定)。
+
+补充实测(rc.6 活体):
+- **远程端点响应是双层信封**:外层 server-response.result.ok 之后,内层再一层 {ok, value/error}(typert 自己的结果包装),解析须剥两层。例:feedback.list 成功 → result.value.ok.value.items
+- commands/list {agentId}(agentId=根会话 id;subagent 会话 → agent-busy "use subagent delivery")返回**裸数组**: [{name, description, input?:{hint}}…];本部署 6 条:compact/export/feedback/goal/permission/plan
+- commands/execute {agentId, line} 成功返回 void(外层 ok:true 无 value);未知命令实测被静默吞(ok:true)——W2 复刻命令菜单时客户端必须自己在目录内校验,不得指望服务端拒绝
+- messageFeedback/list {request:{sessionId}} → 内层 {items:[]}(空目录形态)
+- host.describe 键:version/cwd/provider/model/attachedSessions/canOpenPath(与生成模型一致)
+
+messageFeedback 契约(源自 dsh-message-feedback/lib/types/types.d.ts + typert.remote-client.d.ts,探针验证信封):
+- rating 枚举:**'positive' | 'negative'**(非 like/dislike)
+- put {request:{sessionId, messageId, rating, note?, ifVersion}}(ifVersion=null 表示要求当前不存在;CAS token 来自上次 list)
+- delete {request:{sessionId, messageId, ifVersion}}(幂等,返回 {absent:true};条目已缺席时 ifVersion 被忽略)
+- list {request:{sessionId}} → items[{messageId, rating, note?, version(不透明 CAS token), createdAt, updatedAt}]
+- item 的 version 每次 material create/update 都会轮换;错误含 session-not-found
+- 注意:此前探针 rating:'like' 失败的根因即枚举不匹配
+
+其余远程端点精确签名(各包 typert.remote-client.d.ts;args 字段名即签名参数名):
+- goals/create {agentId, request};goals/edit {agentId, ref, request};goals/pause|resume|complete|clear {agentId, ref}
+- commands/execute {agentId, line};commands/list {agentId} → CommandDescriptor[](name/description/input.hint)
+- 全部远程端点共同约束:subagent 会话作 agentId → agent-busy(ownership fence)
+- session.prompt mode 枚举(zod 实证):**'queue' | 'steer'**(steer=插话进运行中轮次;生成代码里 mode 是 Object,调用方须传字符串字面量)
+
 ## 8. 本机环境事实
 
 - dsh CLI:`/Users/you/.local/lib/node_modules/@deepseek-ai/dsh/`(全局安装,`dsh` 在 PATH)

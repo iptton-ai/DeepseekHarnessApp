@@ -8,9 +8,14 @@ import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/sessions/goal_store.dart';
 import 'package:singleman/sessions/interactor_store.dart';
+import 'package:singleman/sessions/job_store.dart';
 import 'package:singleman/sessions/session_store.dart';
+import 'package:singleman/sessions/settings_store.dart';
+import 'package:singleman/sessions/subagent_store.dart';
+import 'package:singleman/sessions/workspace_store.dart';
 import 'package:singleman/ui/chat_screen.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/connect_config.dart';
 import 'package:singleman/ui/goal_skill_widgets.dart';
 import 'package:singleman/ui/model_picker.dart';
 
@@ -28,9 +33,16 @@ Future<void> main() async {
   final interactor = InteractorStore(api: api, connection: connection);
   final goals = GoalStore(api: api);
   final skills = SkillCatalog(api: api);
+  // W1 集成:四个新域 store,共用 api + connection(见 PLAN「W1 集成规格」)。
+  final workspaces = WorkspaceStore(api: api, connection: connection);
+  final jobs = JobStore(api: api, connection: connection);
+  final subagents = SubagentStore(api: api, connection: connection);
+  final settings = SettingsStore(api: api, connection: connection);
+  final scope = scopeFor(base);
 
   connection.start();
   store.start();
+  workspaces.start();
 
   final vm = ChatViewModel(store: store, connection: connection)..interactor = interactor;
 
@@ -100,6 +112,11 @@ Future<void> main() async {
     sender: (sessionId, text) async {
       await store.promptText(sessionId, text, clientTimeZone: 'UTC');
     },
+    workspaces: workspaces,
+    jobs: jobs,
+    subagents: subagents,
+    settings: settings,
+    scope: scope,
   ));
 }
 
@@ -110,12 +127,22 @@ class SinglemanApp extends StatelessWidget {
     required this.onNewSession,
     required this.sender,
     this.actions,
+    this.workspaces,
+    this.jobs,
+    this.subagents,
+    this.settings,
+    this.scope,
   });
 
   final ChatViewModel vm;
   final Future<void> Function() onNewSession;
   final Future<void> Function(String sessionId, String text) sender;
   final SessionActions? actions;
+  final WorkspaceStore? workspaces;
+  final JobStore? jobs;
+  final SubagentStore? subagents;
+  final SettingsStore? settings;
+  final PrivilegeScope? scope;
 
   @override
   Widget build(BuildContext context) {
@@ -125,7 +152,16 @@ class SinglemanApp extends StatelessWidget {
       navigatorKey: navigatorKey,
       home: ChatSenderBinding(
         sender: sender,
-        child: ChatScreen(vm: vm, onNewSession: onNewSession, actions: actions),
+        child: ChatScreen(
+          vm: vm,
+          onNewSession: onNewSession,
+          actions: actions,
+          workspaces: workspaces,
+          jobs: jobs,
+          subagents: subagents,
+          settings: settings,
+          scope: scope,
+        ),
       ),
     );
   }

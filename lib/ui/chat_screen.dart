@@ -1,14 +1,24 @@
-// ChatScreen — M2 最小 UI:会话侧栏 + 纯文本消息流 + 输入框。
-// 只消费 ChatViewModel(ChangeNotifier),不含任何 socket/HTTP 逻辑。
+// ChatScreen — 会话主界面(W1 集成:workspace 分组侧栏 + 节点流 + jobs/subagent 入口 + 设置;
+// <600dp 移动形态 = 抽屉侧栏,桌面 ≥600dp 保持双栏,见 PLAN「W1 集成规格」)。
+// 只消费注入的 store 视图与 ChatViewModel,不含任何 socket/HTTP 逻辑。
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/sessions/interactor_store.dart';
-import 'package:singleman/sessions/interactor_store.dart';
+import 'package:singleman/sessions/job_store.dart';
+import 'package:singleman/sessions/session_store.dart';
+import 'package:singleman/sessions/settings_store.dart';
+import 'package:singleman/sessions/subagent_store.dart';
+import 'package:singleman/sessions/workspace_store.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/node_widgets.dart';
+import 'package:singleman/ui/connect_config.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 import 'package:singleman/ui/interactor_widgets.dart';
-import 'package:singleman/ui/interactor_widgets.dart';
+import 'package:singleman/ui/jobs_sheet.dart';
+import 'package:singleman/ui/settings_screen.dart';
+import 'package:singleman/ui/subagent_catalog.dart';
+import 'package:singleman/ui/workspace_browser.dart';
 
 /// 会话操作回调束(M4:模型/搜索/fork/导出/重命名;main 注入)。
 class SessionActions {
@@ -27,24 +37,42 @@ class SessionActions {
 }
 
 class ChatScreen extends StatelessWidget {
-  const ChatScreen({super.key, required this.vm, this.onNewSession, this.actions});
+  const ChatScreen({
+    super.key,
+    required this.vm,
+    this.onNewSession,
+    this.actions,
+    this.workspaces,
+    this.jobs,
+    this.subagents,
+    this.settings,
+    this.scope,
+  });
   final ChatViewModel vm;
   final VoidCallback? onNewSession;
   final SessionActions? actions;
+
+  // W1 域注入(均 optional:测试/过渡期可缺省)。
+  final WorkspaceStoreView? workspaces;
+  final JobStoreView? jobs;
+  final SubagentStore? subagents;
+  final SettingsStoreView? settings;
+  final PrivilegeScope? scope;
+
+  static const _kWideBreakpoint = 600.0;
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: vm,
       builder: (context, _) {
-        return Scaffold(
-          body: Row(
-            children: [
-              _Sidebar(vm: vm, onNewSession: onNewSession, actions: actions),
-              const VerticalDivider(width: 1),
-              Expanded(
-                child: _MessagePane(
+        final sidebar = _Sidebar(
+            vm: vm, onNewSession: onNewSession, actions: actions,
+            workspaces: workspaces, settings: settings, scope: scope);
+        final pane = _MessagePane(
                   vm: vm,
+                  jobs: jobs,
+                  subagents: subagents,
                   onApproval: (a, allow) => vm.interactor?.respondApproval(
                       a.rpcId, a.sessionId, a.approvalId,
                       allow: allow),
@@ -67,21 +95,51 @@ class ChatScreen extends StatelessWidget {
                     it.respondQuestions(q.rpcId, q.sessionId, payload);
                   },
                   onQueueRemove: null,
-                ),
-              ),
-            ],
-          ),
-        );
+                );
+        return LayoutBuilder(builder: (context, constraints) {
+          final wide = constraints.maxWidth >= _kWideBreakpoint;
+          if (wide) {
+            return Scaffold(
+              body: Row(children: [
+                sidebar,
+                const VerticalDivider(width: 1),
+                Expanded(child: pane),
+              ]),
+            );
+          }
+          // 移动形态(<600dp):侧栏进抽屉,消息 pane 全屏。
+          return Scaffold(
+            appBar: AppBar(
+              title: _PhaseBadge(vm: vm),
+              actions: [
+                if (onNewSession != null)
+                  IconButton(tooltip: '新建会话', onPressed: onNewSession, icon: const Icon(Icons.add)),
+              ],
+              leading: Builder(builder: (context) {
+                return IconButton(
+                  tooltip: '会话列表',
+                  onPressed: () => Scaffold.of(context).openDrawer(),
+                  icon: const Icon(Icons.menu),
+                );
+              }),
+            ),
+            drawer: Drawer(width: 320, child: SafeArea(child: sidebar)),
+            body: pane,
+          );
+        });
       },
     );
   }
 }
 
 class _Sidebar extends StatefulWidget {
-  const _Sidebar({required this.vm, this.onNewSession, this.actions});
+  const _Sidebar({required this.vm, this.onNewSession, this.actions, this.workspaces, this.settings, this.scope});
   final ChatViewModel vm;
   final VoidCallback? onNewSession;
   final SessionActions? actions;
+  final WorkspaceStoreView? workspaces;
+  final SettingsStoreView? settings;
+  final PrivilegeScope? scope;
 
   @override
   State<_Sidebar> createState() => _SidebarState();
@@ -173,6 +231,24 @@ class _SidebarState extends State<_Sidebar> {
             ),
           ),
           const Divider(height: 1),
+          // W1:workspace 分组浏览器(注入存在时显示;替代纯扁平列表的分组语义)。
+          if (widget.workspaces != null)
+            Flexible(
+              flex: 2,
+              child: WorkspaceBrowser(
+                store: widget.workspaces!,
+                sessionStream: widget.vm.summaries,
+                initialSessions: widget.vm.sessions,
+                callbacks: WorkspaceBrowserCallbacks(
+                  onSelectSession: widget.vm.select,
+                  onNewSession: (_) => widget.onNewSession?.call(),
+                  onRenameSession: (id, title) => widget.actions?.onRename?.call(id, title),
+                  onFork: (id) => widget.actions?.onFork?.call(id),
+                  onArchive: (_) {},
+                ),
+              ),
+            ),
+          if (widget.workspaces != null) const Divider(height: 1),
           Expanded(
             child: visible.isEmpty
                 ? const Center(child: Text('无匹配会话', style: TextStyle(fontSize: 12)))
@@ -182,7 +258,8 @@ class _SidebarState extends State<_Sidebar> {
                       final s = visible[i];
                       final selected = s.sessionId == widget.vm.selectedId;
                       return ListTile(
-                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                        minVerticalPadding: 8,
                         selected: selected,
                         leading: Icon(
                           s.running
@@ -225,6 +302,11 @@ class _SidebarState extends State<_Sidebar> {
                     },
                   ),
           ),
+          // W1:设置入口(仅 loopback;PrivilegeScope 门控在组件内)。
+          if (widget.settings != null && widget.scope != null) ...[
+            const Divider(height: 1),
+            SettingsEntryButton(scope: widget.scope!, store: widget.settings!),
+          ],
         ],
       ),
     );
@@ -330,8 +412,12 @@ class _MessagePane extends StatelessWidget {
     this.onApproval,
     this.onQuestion,
     this.onQueueRemove,
+    this.jobs,
+    this.subagents,
   });
   final ChatViewModel vm;
+  final JobStoreView? jobs;
+  final SubagentStore? subagents;
   final void Function(PendingApproval a, bool allow)? onApproval;
   final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
   final void Function(Map<String, dynamic> item)? onQueueRemove;
@@ -339,10 +425,25 @@ class _MessagePane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final controller = TextEditingController();
+    final sid = vm.selectedId;
     return Column(
       children: [
+        // W1:页头动作区(subagent 目录入口 + 后台任务角标;无内容不渲染,自带语义)。
+        if (sid != null && (jobs != null || subagents != null))
+          SizedBox(
+            height: 48,
+            child: Row(
+              children: [
+                if (subagents != null)
+                  SubagentEntryButton(store: subagents!, parentSessionId: sid),
+                if (jobs != null) JobsTrigger(store: jobs!, sessionId: sid),
+              ],
+            ),
+          ),
         Expanded(
-          child: vm.bubbles.isEmpty
+          child: vm.nodes.isNotEmpty
+              ? ChatNodeList(nodes: vm.nodes)
+              : (vm.bubbles.isEmpty
               ? const Center(child: Text('选择或创建一个会话开始对话'))
               : ListView.builder(
                   padding: const EdgeInsets.all(12),
@@ -393,7 +494,7 @@ class _MessagePane extends StatelessWidget {
                       ),
                     );
                   },
-                ),
+                )),
         ),
         _InteractorPane(vm: vm, onApproval: onApproval, onQuestion: onQuestion, onQueueRemove: onQueueRemove),
         if (vm.lastError != null)
