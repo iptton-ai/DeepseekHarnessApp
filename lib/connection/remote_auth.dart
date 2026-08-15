@@ -115,14 +115,25 @@ class ConnectionPlan {
   final bool needsLogin;
 }
 
+/// 默认网关地址(手机首启无凭证时的登录目标;用户可在登录页改)。
+const kDefaultGatewayBase = 'https://dsh.example.com';
+
 /// loopback 形态永远免鉴权(也避免误带令牌头)。
 bool isLoopbackBase(Uri base) {
   final h = base.host.toLowerCase();
   return h == '127.0.0.1' || h == 'localhost' || h == '[::1]' || h == '::1';
 }
 
-Future<ConnectionPlan> planFromCredentials(CredentialStore store,
-    {Uri? defaultBase}) async {
+/// 启动计划决策。
+///
+/// [mobileFirst]:手机形态(Android/iOS)传 true —— 无历史凭证时 loopback
+/// 默认地址永远不可达(那是手机自己),直接给网关登录计划;桌面保持
+/// loopback 直连零摩擦。
+Future<ConnectionPlan> planFromCredentials(
+  CredentialStore store, {
+  Uri? defaultBase,
+  bool mobileFirst = false,
+}) async {
   final Uri fallback = defaultBase ?? Uri.parse('http://127.0.0.1:3080');
   StoredCredentials? stored;
   try {
@@ -130,9 +141,23 @@ Future<ConnectionPlan> planFromCredentials(CredentialStore store,
   } on Object {
     stored = null;
   }
-  if (stored == null || isLoopbackBase(stored.baseUri)) {
+  if (stored == null) {
+    if (mobileFirst) {
+      return ConnectionPlan(
+        baseUri: Uri.parse(kDefaultGatewayBase),
+        tokenProvider: MutableTokenProvider(null),
+        needsLogin: true,
+      );
+    }
     return ConnectionPlan(
-      baseUri: stored?.baseUri ?? fallback,
+      baseUri: fallback,
+      tokenProvider: MutableTokenProvider(null),
+      needsLogin: false,
+    );
+  }
+  if (isLoopbackBase(stored.baseUri)) {
+    return ConnectionPlan(
+      baseUri: stored.baseUri,
       tokenProvider: MutableTokenProvider(null),
       needsLogin: false,
     );

@@ -10,7 +10,7 @@ class RemoteLoginPage extends StatefulWidget {
     super.key,
     required this.auth,
     required this.onDone,
-    this.initialUrl = 'https://dsh.example.com',
+    this.initialUrl = kDefaultGatewayBase,
     this.title = '连接到 DSH 网关',
   });
 

@@ -100,6 +100,36 @@ void main() {
       expect(plan.tokenProvider.hasToken, isFalse);
     });
 
+    test('mobileFirst: no credentials → gateway login plan (loopback 永不可达)',
+        () async {
+      final plan = await planFromCredentials(
+        MemoryCredentialStore(),
+        mobileFirst: true,
+      );
+      expect(plan.baseUri, Uri.parse(kDefaultGatewayBase));
+      expect(plan.needsLogin, isTrue,
+          reason: '手机首启必须直接见到密码输入页');
+      expect(plan.tokenProvider.hasToken, isFalse);
+    });
+
+    test('mobileFirst: 已存凭证不受影响(静默连/loopback 语义不变)', () async {
+      final remote = MemoryCredentialStore()
+        .._saveSync(StoredCredentials(
+          baseUri: Uri.parse('https://dsh.example.com'),
+          token: 'tok',
+        ));
+      final planRemote = await planFromCredentials(remote, mobileFirst: true);
+      expect(planRemote.needsLogin, isFalse);
+
+      final loop = MemoryCredentialStore()
+        .._saveSync(StoredCredentials(
+          baseUri: Uri.parse('http://127.0.0.1:3080'),
+        ));
+      final planLoop = await planFromCredentials(loop, mobileFirst: true);
+      expect(planLoop.needsLogin, isFalse);
+      expect(planLoop.baseUri, Uri.parse('http://127.0.0.1:3080'));
+    });
+
     test('loopback stored (even with token) → no login, token dropped',
         () async {
       final store = MemoryCredentialStore()

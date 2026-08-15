@@ -78,9 +78,15 @@ class _ScopeThemeChannel implements ThemeSettingsChannel {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final store = FileCredentialStore();
-  final plan = await planFromCredentials(store);
+  // 手机形态(Android/iOS)首启即网关登录 —— loopback 默认地址在手机上
+  // 永远不可达;桌面保持 loopback 直连零摩擦。
+  final mobileFirst = Platform.isAndroid || Platform.isIOS;
+  final plan = await planFromCredentials(store, mobileFirst: mobileFirst);
   boot(plan: plan, credentialStore: store);
 }
+
+/// 上一次 boot 的活动连接(换 base 整代重装时释放,防旧退避循环永驻)。
+ConnectionController? _activeConnection;
 
 /// 按既定计划装配并启动整个应用(登录后换 base 会以新计划重跑)。
 void boot({
@@ -129,14 +135,18 @@ void boot({
   final vm = ChatViewModel(store: store, connection: connection)
     ..interactor = interactor;
 
-  // 登录成功(首登或令牌失效后的重登):写凭证 → 令牌供给原地刷新。
-  // base 变化 → 整代重装(所有 store 持有旧 base 的 ApiClient)。
+  // 登录成功(首登/手动配置/令牌失效后的重登):写凭证 → 令牌供给原地刷新。
+  // base 变化 → 整代重装(所有 store 持有旧 base 的 ApiClient),旧连接释放。
   Future<void> onLoginDone(RemoteLoginSuccess success) async {
     plan.tokenProvider.token = success.token;
     await credentialStore.save(
       StoredCredentials(baseUri: success.baseUri, token: success.token),
     );
     if (success.baseUri != base) {
+      final old = _activeConnection;
+      _activeConnection = null;
+      // 释放旧连接(其退避 Timer/双 WS 都要停);新树随后接管。
+      unawaited(old?.dispose());
       boot(
         plan: ConnectionPlan(
           baseUri: success.baseUri,
@@ -152,6 +162,28 @@ void boot({
     } else {
       connection.resume();
     }
+  }
+
+  _activeConnection = connection;
+
+  // M6:侧栏「远程网关」常驻入口 —— 手机首启后的配置处、桌面加远程/换网关处。
+  final gatewayAuth = RemoteAuthClient();
+  String gatewayLabel() => isLoopbackBase(base)
+      ? '本机直连 · 点此配置远程'
+      : (plan.tokenProvider.hasToken ? '已登录 · ${base.host}' : '未登录 · ${base.host}');
+  void openGatewayLogin() {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return;
+    Navigator.of(ctx).push(MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => RemoteLoginPage(
+        auth: gatewayAuth,
+        initialUrl:
+            isLoopbackBase(base) ? kDefaultGatewayBase : base.toString(),
+        title: '远程网关登录',
+        onDone: onLoginDone,
+      ),
+    ));
   }
 
   // W3-C:首用引导(三步;「不再提示」写 ui-onboarding 命名空间,失败本地兜底)。
@@ -275,6 +307,8 @@ void boot({
           debugPrint('cancel failed: ' + e.toString());
         }
       },
+        onOpenGatewayLogin: openGatewayLogin,
+        gatewayLabel: gatewayLabel(),
       ),
     ),
   );
@@ -360,6 +394,8 @@ class SinglemanApp extends StatelessWidget {
     this.feedback,
     this.theme,
     this.onCancelSession,
+    this.onOpenGatewayLogin,
+    this.gatewayLabel,
   });
 
   final ChatViewModel vm;
@@ -379,6 +415,10 @@ class SinglemanApp extends StatelessWidget {
   final FeedbackStore? feedback;
   final ThemeStore? theme;
   final void Function(String sessionId)? onCancelSession;
+
+  // M6 远程网关入口(透传 ChatScreen)。
+  final VoidCallback? onOpenGatewayLogin;
+  final String? gatewayLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -408,6 +448,8 @@ class SinglemanApp extends StatelessWidget {
             feedback: feedback,
             theme: theme,
             onCancelSession: onCancelSession,
+            onOpenGatewayLogin: onOpenGatewayLogin,
+            gatewayLabel: gatewayLabel,
           ),
         ),
       ),

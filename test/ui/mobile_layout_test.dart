@@ -74,11 +74,11 @@ WorkspaceView _ws(String id, String title, List<String> sessionIds) =>
     );
 
 SessionSummary _summary(String id) => SessionSummary(
-      sessionId: id,
-      updatedAt: 1786760000000,
-      running: false,
-      blank: false,
-    );
+  sessionId: id,
+  updatedAt: 1786760000000,
+  running: false,
+  blank: false,
+);
 
 void main() {
   testWidgets('窄屏(<600dp):侧栏进抽屉,打开后 workspace 分组可见', (tester) async {
@@ -87,12 +87,16 @@ void main() {
     final sessions = _FakeSessionView();
     sessions.emit([_summary('s1')]);
     final ws = _FakeWorkspaceStore();
-    ws.emit([_ws('w1', '我的工作区', ['s1'])]);
+    ws.emit([
+      _ws('w1', '我的工作区', ['s1']),
+    ]);
     final vm = ChatViewModel(store: sessions, connection: null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: ChatScreen(vm: vm, workspaces: ws),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(vm: vm, workspaces: ws),
+      ),
+    );
     await tester.pump();
 
     // 窄屏:消息 pane 直接可见,菜单按钮存在;workspace 分组不直接渲染(在抽屉里)。
@@ -111,15 +115,82 @@ void main() {
     final sessions = _FakeSessionView();
     sessions.emit([_summary('s1')]);
     final ws = _FakeWorkspaceStore();
-    ws.emit([_ws('w1', '宽屏工作区', ['s1'])]);
+    ws.emit([
+      _ws('w1', '宽屏工作区', ['s1']),
+    ]);
     final vm = ChatViewModel(store: sessions, connection: null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: ChatScreen(vm: vm, workspaces: ws),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(vm: vm, workspaces: ws),
+      ),
+    );
     await tester.pump();
 
     expect(find.byIcon(Icons.menu), findsNothing);
     expect(find.text('宽屏工作区'), findsOneWidget);
+  });
+
+  testWidgets('workspace 标题可折叠/展开组内会话', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final sessions = _FakeSessionView();
+    sessions.emit([_summary('s1')]);
+    final ws = _FakeWorkspaceStore();
+    ws.emit([
+      _ws('w1', '可折叠工作区', ['s1']),
+    ]);
+    final vm = ChatViewModel(store: sessions, connection: null);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(vm: vm, workspaces: ws),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('s1'), findsOneWidget);
+    await tester.tap(find.text('可折叠工作区'));
+    await tester.pump();
+    expect(find.text('s1'), findsNothing);
+
+    await tester.tap(find.text('可折叠工作区'));
+    await tester.pump();
+    expect(find.text('s1'), findsOneWidget);
+  });
+
+  testWidgets('M6:侧栏常驻「远程网关」入口 —— 窄屏抽屉内可见,点击回调',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final sessions = _FakeSessionView();
+    sessions.emit([_summary('s1')]);
+    final ws = _FakeWorkspaceStore();
+    ws.emit([_ws('w1', '我的工作区', ['s1'])]);
+    final vm = ChatViewModel(store: sessions, connection: null);
+
+    var opened = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(
+          vm: vm,
+          workspaces: ws,
+          onOpenGatewayLogin: () => opened++,
+          gatewayLabel: '已登录 · dsh.example.com',
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // 窄屏:入口在抽屉里,主界面不直接可见。
+    expect(find.text('远程网关'), findsNothing);
+    await tester.tap(find.byIcon(Icons.menu));
+    await tester.pumpAndSettle();
+    expect(find.text('远程网关'), findsOneWidget);
+    expect(find.text('已登录 · dsh.example.com'), findsOneWidget);
+
+    await tester.tap(find.text('远程网关'));
+    await tester.pump();
+    expect(opened, 1);
   });
 }
