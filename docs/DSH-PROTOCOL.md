@@ -119,7 +119,7 @@ agent-preset/selected;重连不重放,消费端自行重拉。
 验证:curl 探针 + @deepseek-ai/dsh-api-remotes/README.zh.md(挂载面)、dsh-api-gateway(args 约定)。
 
 补充实测(rc.6 活体):
-- **远程端点响应是双层信封**:外层 server-response.result.ok 之后,内层再一层 {ok, value/error}(typert 自己的结果包装),解析须剥两层。例:feedback.list 成功 → result.value.ok.value.items
+- **远程端点响应的信封层数按端点而异**(2026-08-15 复核修正,此前「一律双层」的结论过泛):commands/list 的 result.value 是**裸数组**;pluginInventory/list 的 result.value 是**普通 Map**(entries 键);仅返回 TS RemoteResult 的端点(messageFeedback、goals)才多一层内层 {ok, value/error} 信封。解析策略:先看 value 形状,Map 且含 ok 键才剥内层
 - commands/list {agentId}(agentId=根会话 id;subagent 会话 → agent-busy "use subagent delivery")返回**裸数组**: [{name, description, input?:{hint}}…];本部署 6 条:compact/export/feedback/goal/permission/plan
 - commands/execute {agentId, line} 成功返回 void(外层 ok:true 无 value);未知命令实测被静默吞(ok:true)——W2 复刻命令菜单时客户端必须自己在目录内校验,不得指望服务端拒绝
 - messageFeedback/list {request:{sessionId}} → 内层 {items:[]}(空目录形态)
@@ -139,6 +139,8 @@ messageFeedback 契约(源自 dsh-message-feedback/lib/types/types.d.ts + typert
 - 全部远程端点共同约束:subagent 会话作 agentId → agent-busy(ownership fence)
 - session.prompt mode 枚举(zod 实证):**'queue' | 'steer'**(steer=插话进运行中轮次;生成代码里 mode 是 Object,调用方须传字符串字面量)
 - 主题持久化:web 的 Appearance 行写 settings 命名空间 **"ui-theme"**(preference 键,light/dark/system)——theme/* 远程端点不可达,但 settings.mutate 可达,客户端主题同步走此通道(W3 用)
+- 轨迹视图(web trajectory)零新 RPC:消费 runtime 的会话快照 + loadOlder(= session.history 分页,SessionStore 已有)。W3 实现为 SessionLog 上的纯客户端视图(轮次分组/ledger 行/检查器)
+- 图片消息回显:**本部署模型目录无视觉模型**(全 catalog 无 image/vision 能力标记;prompt 带 image → attachment-error "does not support image input")。user/message 事件的图片引用形状无法在活体采样 → W3 的 refs 提取按防御式实现(data.content[] 中 type=='image' 携带 attachmentId 等 ImageAttachmentRef 字段),以 fixture 测试验收;真机有视觉模型后再活体验证(M4 结论同源:回执按需补)
 
 ## 8. 本机环境事实
 
