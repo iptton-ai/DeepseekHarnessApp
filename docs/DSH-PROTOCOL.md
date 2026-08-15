@@ -81,6 +81,7 @@ HostFrame:会话创建/销毁(`host/session-added`)、运行状态(`host/session
 - **LAN**:需 `dsh web --host <本机IP>` + `--trusted-host <authority>`;`--host 0.0.0.0` 被故意拒绝(直接报错退出)。全接口绑定时,web-app 会自动把本机 IPv4 LAN 字面地址加入信任表
 - **特权方法钉死 loopback**(LAN 客户端调了→403):`host.pickDirectory` `host.openPath`、整个 `settings.*`(含 describe 读)、整个 `credentials.*`、`agentPreset.read/copy/openDocument/remove`。核心聊天/审批/会话面**不受限**
 - 围栏是**可达性策略,不是认证**——没有身份验证层。DSH 带 bash 工具 = 任何可达者可 RCE。公网暴露 🔴 绝对禁止,直到上游加认证
+- **M6 补充:公网形态经 dsh-gateway 前置鉴权解锁**(ADR-0006):服务器网关校验设备令牌后经 SSH 反向隧道转发并把 Host 改写为 `127.0.0.1:3080` → dsh 视为桌面同机客户端(loopback 直接过 + 特权方法放行),鉴权边界收敛于网关。客户端 `PrivilegeScope.authenticatedRemote` 与此对齐
 - Host 头是 DNS-rebinding 防线:必须为 loopback authority 或匹配 trustedHosts(WHATWG 归一化比较);带 `Origin` 时必须等于 Host authority;显式 `sec-fetch-site: cross-site` 拒绝
 - **无协议版本字段**(客户端与主机同发同布,版本协商是上游 reserved 项;我们作为首个独立客户端应在握手层预留)
 

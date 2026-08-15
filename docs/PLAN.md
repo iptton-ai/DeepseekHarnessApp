@@ -115,6 +115,48 @@
 
 6. **移动可用性验收**:切片 UI 必须附窄屏(360dp)widget 测试或说明为何域层无 UI。
 
+## M6 移动端公网鉴权接入(2026-08-15)
+
+### ADR-0006 公网形态:前置鉴权网关 + SSH 反向隧道(非 dsh 插件)
+
+**决策**:不在 dsh 进程内做鉴权(dsh-host-webserver 明示「无 TLS/auth,交给前置反向代理」;
+/api 路由由 client-connection 插件独占,进程内无插队点),改为在 example.com 服务器部署
+**dsh-gateway**(Rust/Axum,rusqlite,~5MB 常驻):
+
+```
+手机 singleman ─https→ nginx(dsh.example.com, TLS) → dsh-gateway:8102(鉴权+中转)
+                                                        │ SSH 反向隧道(launchd 常驻)
+                                                        ▼
+                                              Mac dsh web(127.0.0.1:3080,零改动)
+```
+
+- **鉴权**:密码登录(argon2,每 IP 5 分钟 8 次限速)→ 30 天设备令牌(HS256 JWT,
+  SQLite 登记 jti,可吊销);所有中转请求(HTTP + WS upgrade)强制 `Authorization: Bearer`
+- **过围栏**:隧道出口 TCP 即 loopback;网关转发时改写 Host 为 `127.0.0.1:3080`
+  → dsh 信任围栏按「桌面同机」放行,特权方法(settings/credentials)对持令牌设备开放,
+  鉴权边界收敛于网关一处
+- **服务器负载**(用户关切"是否只首次连接"):**不是** —— 全部客户端↔dsh 流量持续经
+  服务器中转,但它是纯字节管道(聊天 JSON/图片,KB~MB 级;实测常驻 4.9MB 内存/9ms CPU),
+  且 LLM 供应商流量(dsh↔provider,真正的大头)不经服务器;2C2G 绰绰有余。
+  P2P 打洞(仅首连用服务器)需 WebRTC 级穿透栈,复杂度不成立
+- **客户端**:凭证存 `~/.singleman/credentials.json`(app 沙箱内;密码永不落盘);
+  启动按凭证决策(loopback 直连 / 远程静默连 / 远程首登);401 → 停退避重试、拉起
+  重登页,令牌原地刷新后 resume;PrivilegeScope 增 `authenticatedRemote`(远程鉴权
+  形态特权面可见)
+- **部署 6 处**(example.com 仓库):workspace/build 脚本/.cnb.yml/nginx(子域+WS
+  upgrade+流式透传)/systemd/CLAUDE.md;密钥在服务器 `/etc/dsh-gateway.env`(不入 git)
+
+**验收**:gateway 6 集成测试全绿(登录/401/吊销/Host 改写/WS echo/限速);客户端
++23 测(401 停链/头注入/登录页/凭证/计划决策)全量 303 绿;活体 AUTH-SMOKE-PASS
+(真实登录 + 经网关真实 LLM 轮);服务器实测:healthz/login/describe/WS upgrade/401
+拒止全链路通过。DNS A 记录 dsh.example.com → 203.0.113.10 由用户在 DNSPod 添加。
+
+### 遗留(按需)
+- 移动端令牌存储升级 flutter_secure_storage(现为沙箱内明文 JSON,可吊销兜底;
+  OHOS fork 插件可用性未验证,故未引)
+- Android HOME 环境变量缺失时依赖 path_provider(已引,插件缺失时兜底当前目录)
+- 登录页暂无「设备管理/退出登录」入口(服务端 /auth/devices /auth/revoke 已可用)
+
 ## 任务模板(五件套)
 
 任何任务(给人或 agent)必须包含:

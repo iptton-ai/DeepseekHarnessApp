@@ -44,7 +44,7 @@ Flutter 客户端
 
 - DSH 安装位置:`/Users/you/.local/lib/node_modules/@deepseek-ai/dsh/`(版本 0.1.0-rc.6)
 - 本机 GUI:`http://127.0.0.1:3080`(dsh web 默认端口)
-- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟡(需 `--trusted-host`)/ 公网 🔴(无认证层,禁止)
+- 部署形态分级:桌面同机 🟢 / 手机 LAN 🟡(需 `--trusted-host`)/ 公网 🟢(M6 起:经 dsh.example.com 鉴权网关,见 `tool/remote/README.md` 与 docs/PLAN.md ADR-0006)
 
 ## 工作规则
 
