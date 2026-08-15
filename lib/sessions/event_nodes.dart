@@ -36,14 +36,19 @@ sealed class ChatNode {
 
 /// 用户气泡(右对齐;agent.inject 的合成上下文被过滤,对齐 chat_view_model)。
 class ChatNodeUser extends ChatNode {
-  const ChatNodeUser({required super.seq, required super.type, required this.text});
+  const ChatNodeUser({required super.seq, required super.type, required this.text, this.images});
   final String text;
+
+  /// 图片附件引用(本部署无视觉模型,线上暂无真实样本;形状防御式提取,见
+  /// _imageRefs —— fixture 验收,有视觉模型后活体复验)。
+  final List<ImageAttachmentRef>? images;
 }
 
 /// 助手消息(markdown 文本,UI 用 MarkdownWidget 渲染)。
 class ChatNodeAssistant extends ChatNode {
-  const ChatNodeAssistant({required super.seq, required super.type, required this.text});
+  const ChatNodeAssistant({required super.seq, required super.type, required this.text, this.images});
   final String text;
+  final List<ImageAttachmentRef>? images;
 }
 
 /// think 折叠块(默认收起,点开显示全文)。
@@ -260,6 +265,41 @@ ChatNodeTool _mergeCallResult(ChatNodeTool call, ChatNodeTool result) => ChatNod
     );
 
 /// 非工具事件 → 按类型词表分派;未覆盖的走未知兜底。
+/// 防御式图片引用提取:data.content[](或 data.images[])中 type=='image' 的块。
+/// 块内应含 ImageAttachmentRef 字段(attachmentId/mediaType/bytes/width/height/name?);
+/// 缺关键字段的块跳过(不猜)。本部署无视觉模型,fixture 验收(PROTOCOL §9)。
+List<ImageAttachmentRef> _imageRefs(dynamic data) {
+  if (data is! Map) return const [];
+  final candidates = <dynamic>[
+    if ((data['content'] as List?) != null) ...(data['content'] as List),
+    if ((data['images'] as List?) != null) ...(data['images'] as List),
+  ];
+  final refs = <ImageAttachmentRef>[];
+  for (final c in candidates) {
+    if (c is! Map) continue;
+    final isImage = c['type'] == 'image' || c['attachmentId'] is String;
+    if (!isImage) continue;
+    final attachmentId = c['attachmentId'];
+    if (attachmentId is! String) continue;
+    final mediaType = c['mediaType'];
+    final bytes = c['bytes'];
+    final width = c['width'];
+    final height = c['height'];
+    if (mediaType is! String || bytes is! num || width is! num || height is! num) {
+      continue;
+    }
+    refs.add(ImageAttachmentRef(
+      attachmentId: attachmentId,
+      mediaType: mediaType,
+      bytes: bytes.toInt(),
+      width: width.toInt(),
+      height: height.toInt(),
+      name: c['name'] is String ? c['name'] as String? : null,
+    ));
+  }
+  return refs;
+}
+
 List<ChatNode> _nodesFor(SessionEvent event) {
   final type = event.type;
   final data = event.data;
@@ -267,18 +307,20 @@ List<ChatNode> _nodesFor(SessionEvent event) {
     // 直发人类消息才冒泡;agent.inject 的合成上下文不进聊天流(对齐 chat_view_model)。
     if (_injected(data)) return const [];
     final text = extractText(data);
-    if (text.isEmpty) return const [];
-    return [ChatNodeUser(seq: event.seq, type: type, text: text)];
+    final images = _imageRefs(data);
+    if (text.isEmpty && images.isEmpty) return const [];
+    return [ChatNodeUser(seq: event.seq, type: type, text: text, images: images.isEmpty ? null : images)];
   }
   if (type == 'assistant/message') {
     final text = extractText(data);
     final think = _reasoningText(data);
+    final images = _imageRefs(data);
     final nodes = <ChatNode>[];
     if (think != null && think.isNotEmpty) {
       nodes.add(ChatNodeThink(seq: event.seq, type: '$type/reasoning', text: think));
     }
-    if (text.isNotEmpty) {
-      nodes.add(ChatNodeAssistant(seq: event.seq, type: type, text: text));
+    if (text.isNotEmpty || images.isNotEmpty) {
+      nodes.add(ChatNodeAssistant(seq: event.seq, type: type, text: text, images: images.isEmpty ? null : images));
     }
     return nodes;
   }

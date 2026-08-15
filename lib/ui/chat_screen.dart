@@ -92,6 +92,7 @@ class ChatScreen extends StatelessWidget {
                   jobs: jobs,
                   subagents: subagents,
                   commands: commands,
+                  attachments: attachments,
                   onCancelSession: onCancelSession,
                   onApproval: (a, allow) => vm.interactor?.respondApproval(
                       a.rpcId, a.sessionId, a.approvalId,
@@ -460,12 +461,14 @@ class _MessagePane extends StatelessWidget {
     this.jobs,
     this.subagents,
     this.commands,
+    this.attachments,
     this.onCancelSession,
   });
   final ChatViewModel vm;
   final JobStoreView? jobs;
   final SubagentStore? subagents;
   final CommandStoreView? commands;
+  final AttachmentFetchView? attachments;
   final void Function(String sessionId)? onCancelSession;
   final void Function(PendingApproval a, bool allow)? onApproval;
   final void Function(PendingQuestion q, List<QuestionAnswerDraft> drafts)? onQuestion;
@@ -513,7 +516,7 @@ class _MessagePane extends StatelessWidget {
           ),
         Expanded(
           child: vm.nodes.isNotEmpty
-              ? ChatNodeList(nodes: vm.nodes)
+              ? ChatNodeList(nodes: vm.nodes, sessionId: vm.selectedId, attachmentFetcher: attachments)
               : (vm.bubbles.isEmpty
               ? const Center(child: Text('选择或创建一个会话开始对话'))
               : ListView.builder(

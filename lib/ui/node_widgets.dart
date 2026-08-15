@@ -6,7 +6,10 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/event_nodes.dart';
+import 'package:singleman/ui/attachment_views.dart';
+import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 常显触控高度下限(移动可用性硬性要求)。
 const double kNodeTapHeight = 44;
@@ -14,8 +17,12 @@ const double kNodeTapHeight = 44;
 /// 会话流节点列表:输入 [nodes],渲染整条消息流。
 /// 折叠状态由各节点自持(重放/重建时按位置稳定),本层不做外部记忆。
 class ChatNodeList extends StatelessWidget {
-  const ChatNodeList({super.key, required this.nodes, this.padding});
+  const ChatNodeList({super.key, required this.nodes, this.padding, this.sessionId, this.attachmentFetcher});
   final List<ChatNode> nodes;
+
+  /// 图片附件渲染(W2-C):会话 id + 共享 fetcher;缺席时图片引用不渲染。
+  final String? sessionId;
+  final AttachmentFetchView? attachmentFetcher;
   final EdgeInsetsGeometry? padding;
 
   @override
@@ -29,9 +36,11 @@ class ChatNodeList extends StatelessWidget {
   }
 
   Widget _nodeWidget(BuildContext context, ChatNode node) {
+    final sid = sessionId;
+    final fetcher = (sid != null) ? attachmentFetcher : null;
     return switch (node) {
-      ChatNodeUser() => _UserBubble(text: node.text),
-      ChatNodeAssistant() => _AssistantBubble(text: node.text),
+      ChatNodeUser() => _UserBubble(text: node.text, images: node.images, sessionId: sid, fetcher: fetcher),
+      ChatNodeAssistant() => _AssistantBubble(text: node.text, images: node.images, sessionId: sid, fetcher: fetcher),
       ChatNodeThink() => _ThinkBlock(text: node.text),
       ChatNodeTool() => _ToolCard(node: node),
       ChatNodeTodo() => _TodoCard(node: node),
@@ -53,8 +62,11 @@ class ChatNodeList extends StatelessWidget {
 
 /// 用户气泡:右对齐,全文不截断。
 class _UserBubble extends StatelessWidget {
-  const _UserBubble({required this.text});
+  const _UserBubble({required this.text, this.images, this.sessionId, this.fetcher});
   final String text;
+  final List<ImageAttachmentRef>? images;
+  final String? sessionId;
+  final AttachmentFetchView? fetcher;
 
   @override
   Widget build(BuildContext context) {
@@ -70,7 +82,19 @@ class _UserBubble extends StatelessWidget {
           color: Theme.of(context).colorScheme.primaryContainer,
           borderRadius: BorderRadius.circular(10),
         ),
-        child: Text(text),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (text.isNotEmpty) Text(text),
+            if (images != null && images!.isNotEmpty && sessionId != null && fetcher != null)
+              MessageImages(
+                sessionId: sessionId!,
+                refs: images!,
+                fetcher: fetcher!,
+                alignment: WrapAlignment.end,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -78,8 +102,11 @@ class _UserBubble extends StatelessWidget {
 
 /// 助手气泡:markdown 渲染(flutter_markdown),全文不截断。
 class _AssistantBubble extends StatelessWidget {
-  const _AssistantBubble({required this.text});
+  const _AssistantBubble({required this.text, this.images, this.sessionId, this.fetcher});
   final String text;
+  final List<ImageAttachmentRef>? images;
+  final String? sessionId;
+  final AttachmentFetchView? fetcher;
 
   @override
   Widget build(BuildContext context) {
@@ -90,15 +117,27 @@ class _AssistantBubble extends StatelessWidget {
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
       ),
-      child: MarkdownBody(
-        data: text,
-        styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-          p: const TextStyle(fontSize: 14),
-          codeblockDecoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(6),
-          ),
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (text.isNotEmpty)
+            MarkdownBody(
+              data: text,
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                p: const TextStyle(fontSize: 14),
+                codeblockDecoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+            ),
+          if (images != null && images!.isNotEmpty && sessionId != null && fetcher != null)
+            MessageImages(
+              sessionId: sessionId!,
+              refs: images!,
+              fetcher: fetcher!,
+            ),
+        ],
       ),
     );
   }
