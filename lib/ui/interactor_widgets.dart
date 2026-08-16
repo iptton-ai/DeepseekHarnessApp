@@ -464,18 +464,42 @@ class _ChoiceMarker extends StatelessWidget {
 }
 
 /// 队列 Dock:某会话的待处理收件箱快照(session/queue 整帧收敛语义)。
+/// 仅显示 placement == 'queued' 的项(web QueueDock 同款;steering/context
+/// 项不是待处理输入)。每项提供 移除 / 插话(仅 running 可用)动作。
 class QueueDock extends StatelessWidget {
   const QueueDock({
     super.key,
     required this.items,
-    required this.onRemove,
+    required this.running,
+    this.onRemove,
+    this.onSteer,
   });
+
+  /// 会话队列快照(原始 map:{id, placement, message})。
   final List<Map<String, dynamic>> items;
+
+  /// 当前会话 running(插话仅运行中可用 —— host 窗口语义)。
+  final bool running;
+
   final void Function(Map<String, dynamic> item)? onRemove;
+
+  /// 插话:把该排队项提升为 steering(session.updateQueue kind:'steer')。
+  final void Function(Map<String, dynamic> item)? onSteer;
+
+  /// 排队项(placement == 'queued')。
+  List<Map<String, dynamic>> get _queued => [
+        for (final item in items)
+          if (item['placement'] == 'queued') item,
+      ];
+
+  /// 队列项 id(host schema:id: MessageId;防御缺失)。
+  static String? itemIdOf(Map<String, dynamic> item) =>
+      item['id'] is String ? item['id'] as String : null;
 
   @override
   Widget build(BuildContext context) {
-    if (items.isEmpty) return const SizedBox.shrink();
+    final queued = _queued;
+    if (queued.isEmpty) return const SizedBox.shrink();
     final colors = Theme.of(context).colorScheme;
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -493,22 +517,18 @@ class QueueDock extends StatelessWidget {
               Icon(Icons.schedule_send_outlined, size: 15, color: colors.primary),
               const SizedBox(width: 6),
               Text(
-                '排队消息(${items.length})',
+                '排队消息(' + queued.length.toString() + ')',
                 style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5),
               ),
             ],
           ),
-          for (final item in items)
+          for (final item in queued)
             ListTile(
               dense: true,
               visualDensity: VisualDensity.compact,
               contentPadding: const EdgeInsets.symmetric(horizontal: 4),
               leading: Icon(
-                item['placement'] == 'steering'
-                    ? Icons.call_split
-                    : item['placement'] == 'context'
-                        ? Icons.library_books
-                        : Icons.schedule,
+                Icons.schedule,
                 size: 18,
                 color: colors.onSurfaceVariant,
               ),
@@ -519,11 +539,22 @@ class QueueDock extends StatelessWidget {
                 style: const TextStyle(fontSize: 13),
               ),
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                if (onRemove != null)
+                if (onRemove != null && itemIdOf(item) != null)
                   IconButton(
                     tooltip: '移除',
                     icon: const Icon(Icons.delete_outline, size: 18),
                     onPressed: () => onRemove!(item),
+                  ),
+                if (onSteer != null && itemIdOf(item) != null)
+                  IconButton(
+                    // web locale queue.steer / queue.steer.unavailable。
+                    tooltip: running ? '插话发送' : '仅运行中可插话发送',
+                    icon: Icon(
+                      Icons.send_outlined,
+                      size: 18,
+                      color: running ? colors.primary : colors.onSurfaceVariant,
+                    ),
+                    onPressed: running ? () => onSteer!(item) : null,
                   ),
               ]),
             ),

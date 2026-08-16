@@ -333,6 +333,41 @@ void main() {
     final text = nodes.whereType<ChatNodeAssistant>().single;
     expect(text.text, '你好,世界');
     expect(text.streaming, isTrue);
+    // 流式节点 seq 锚定块首事件(firstSeq):delta 继续到达也不变 ——
+    // 列表 ValueKey 稳定,item State(think 展开态/尾随滚动)跨帧保留。
+    expect(think.seq, 2);
+    expect(text.seq, 2);
+    // 再追加 delta 后重新提取:seq 仍稳定,文本增长。
+    final grown = extractNodes([
+      _in(1, 'turn/start', {'turn': 1}),
+      _in(2, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'block-start', 'index': 0, 'blockType': 'reasoning'},
+      }),
+      _in(3, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'reasoning-delta', 'index': 0, 'text': '想想'},
+      }),
+      _in(4, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'block-start', 'index': 1, 'blockType': 'text'},
+      }),
+      _in(5, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 1, 'text': '你好'},
+      }),
+      _in(6, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 1, 'text': ',世界'},
+      }),
+      _in(7, 'assistant/chunk', {
+        'turn': 1, 'step': 1,
+        'chunk': {'type': 'text-delta', 'index': 1, 'text': '!!'},
+      }),
+    ]);
+    final grownText = grown.whereType<ChatNodeAssistant>().single;
+    expect(grownText.seq, 2); // 不随 lastSeq(7)漂移
+    expect(grownText.text, '你好,世界!!');
   });
 
   test('assistant/chunk 折叠被同 (turn,step) 的 assistant/message 定稿替换', () {
@@ -545,6 +580,27 @@ void main() {
     expect(n.detail, '注入 2 条 · 移除 1 条');
   });
 
+  test('摘要种子兜底:Map 输入无 command/path 键 → 格式化 JSON 预览(不崩溃)', () {
+    // 回归:线上 run_code 等工具的 input 是 Map 但没有 cmdKeys/pathKeys,
+    // _summarySeed 曾声明 String? 却 return Map → 运行时隐式下转崩溃
+    // (type '_Map<String, dynamic>' is not a subtype of 'String?')。
+    final nodes = extractNodes([
+      _in(1, 'tool/call', {
+        'name': 'run_code',
+        'callId': 'c1',
+        'input': {
+          'description': '列出文件',
+          'code': 'ls -la',
+        },
+      }),
+    ]);
+    final tool = nodes.single as ChatNodeTool;
+    expect(tool.toolName, 'run_code');
+    expect(tool.summary, isNotNull);
+    // 摘要是格式化 JSON 的截断预览(含键名),不再是崩溃。
+    expect(tool.summary, contains('description'));
+  });
+
   test('乱序输入 → seq 升序输出;两次提取一致(纯函数可重放)', () {
     final inputs = [
       _in(2, 'assistant/message', {
@@ -577,5 +633,239 @@ void main() {
       if (n is ChatNodeError) texts.add(n.message);
     }
     expect(texts, ['A', 'B', 'E']);
+  });
+
+// ---------------------------------------------------------------------------
+// 中断/异常落点(0.1.0-rc.6 权威形状:dsh-session TurnEndReasonMap +
+// dsh-agent-loop appendSkippedToolCall + interruptedTurnClosers 崩溃修复)
+// ---------------------------------------------------------------------------
+
+  /// 线上合成 tool/result 的权威形状:message.content[].tool-result +
+  /// 顶层 data.error = {name, code}(无 message 字段)。
+  Map<String, dynamic> abortResult(String callId, String code, String text) => {
+    'turn': 1,
+    'step': 1,
+    'message': {
+      'source': {'kind': 'tool', 'callId': callId},
+      'content': [
+        {
+          'type': 'tool-result',
+          'toolCallId': callId,
+          'isError': true,
+          'content': [
+            {'type': 'text', 'text': text},
+          ],
+        },
+      ],
+    },
+    'error': {'name': 'AbortError', 'code': code},
+  };
+
+  test('取消未派发调用:ABORTED_BEFORE_DISPATCH → 中断卡,不显示红错误框', () {
+    final nodes = extractNodes([
+      _in(4, 'tool/call', {
+        'turn': 1, 'step': 1,
+        'name': 'bash', 'callId': 'c1',
+        'arguments': '{"command":"sleep 10"}',
+      }),
+      _in(5, 'tool/result', abortResult(
+        'c1', 'ABORTED_BEFORE_DISPATCH', 'Error: tool call aborted before dispatch',
+      )),
+    ]);
+    expect(nodes, hasLength(1));
+    final tool = nodes.single as ChatNodeTool;
+    expect(tool.status, ToolStatus.interrupted);
+    // 输出文本原样留在输出区(不提升进 error,对齐 web stopped 语义)。
+    expect(tool.error, isNull);
+    expect(tool.output, 'Error: tool call aborted before dispatch');
+  });
+
+  test('已派发被中断:ABORTED → 中断卡;崩溃修复 code 同样判中断', () {
+    for (final code in ['ABORTED', 'TOOL_OUTCOME_UNKNOWN', 'TOOL_NOT_STARTED']) {
+      final nodes = extractNodes([
+        _in(4, 'tool/call', {'name': 'bash', 'callId': 'c1'}),
+        _in(5, 'tool/result', abortResult('c1', code, 'unknown outcome')),
+      ]);
+      final tool = nodes.single as ChatNodeTool;
+      expect(tool.status, ToolStatus.interrupted, reason: code);
+    }
+  });
+
+  test('普通失败(isError 无 code)仍为失败卡 + 输出提升为错误文本(回归)', () {
+    final nodes = extractNodes([
+      _in(4, 'tool/call', {'name': 'bash', 'callId': 'c1'}),
+      _in(5, 'tool/result', {
+        'message': {
+          'source': {'kind': 'tool', 'callId': 'c1'},
+          'content': [
+            {
+              'type': 'tool-result',
+              'toolCallId': 'c1',
+              'isError': true,
+              'content': [
+                {'type': 'text', 'text': 'command not found'},
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+    final tool = nodes.single as ChatNodeTool;
+    expect(tool.status, ToolStatus.failed);
+    expect(tool.error, 'command not found');
+  });
+
+  test('turn/end(aborted)结算未配对运行卡为中断 + 「本轮已停止」提示', () {
+    final nodes = extractNodes([
+      _in(1, 'turn/start', {'turn': 1}),
+      _in(2, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': '跑个长任务'},
+        ],
+      }),
+      _in(3, 'tool/call', {
+        'turn': 1, 'step': 1,
+        'name': 'bash', 'callId': 'c1',
+        'arguments': '{"command":"sleep 100"}',
+      }),
+      _in(4, 'turn/end', {
+        'turn': 1,
+        'reason': {
+          'kind': 'aborted',
+          'reason': {'kind': 'user'},
+        },
+      }),
+    ]);
+    // 用户气泡 + 中断工具卡 + 停止提示;turn/start 仍不占位。
+    expect(nodes, hasLength(3));
+    final tool = nodes.whereType<ChatNodeTool>().single;
+    expect(tool.status, ToolStatus.interrupted);
+    expect(tool.resultSeq, 4); // 结算锚定 turn/end
+    expect(tool.seq, 3); // 卡保持 call 位(列表 key 稳定)
+    final notice = nodes.whereType<ChatNodeNotice>().single;
+    expect(notice.title, '本轮已停止');
+    expect(notice.detail, '用户停止');
+    expect(notice.icon, 'stop');
+  });
+
+  test('step/end 精确结算同 (turn,step) 的运行卡;其他 step 不受影响', () {
+    final nodes = extractNodes([
+      _in(3, 'tool/call', {
+        'turn': 1, 'step': 1,
+        'name': 'read', 'callId': 'cA',
+      }),
+      _in(4, 'step/end', {'turn': 1, 'step': 1}),
+      _in(5, 'tool/call', {
+        'turn': 1, 'step': 2,
+        'name': 'bash', 'callId': 'cB',
+      }),
+      _in(6, 'step/end', {'turn': 2, 'step': 1}), // 别的 turn 边界
+    ]);
+    final a = nodes[0] as ChatNodeTool;
+    final b = nodes[1] as ChatNodeTool;
+    expect(a.callId, 'cA');
+    expect(a.status, ToolStatus.interrupted); // 自己的 step 关闭 → 结算
+    expect(a.resultSeq, 4);
+    expect(b.callId, 'cB');
+    expect(b.status, ToolStatus.running); // 别的范围关闭 → 不动
+    expect(b.resultSeq, isNull);
+  });
+
+  test('结算后的真实结果不再重复占卡(pending 已消耗)', () {
+    // 极端乱序:结算后同 callId 的迟到 result 只能成独立卡,不覆盖。
+    final nodes = extractNodes([
+      _in(3, 'tool/call', {'turn': 1, 'step': 1, 'name': 'bash', 'callId': 'c1'}),
+      _in(4, 'turn/end', {'turn': 1, 'reason': {'kind': 'aborted'}}),
+      _in(5, 'tool/result', {'callId': 'c1', 'output': 'late'}),
+    ]);
+    expect(nodes, hasLength(3));
+    final tool = nodes.whereType<ChatNodeTool>().first;
+    expect(tool.status, ToolStatus.interrupted);
+    final late = nodes.whereType<ChatNodeTool>().last;
+    expect(late.output, 'late');
+  });
+
+  test('turn/end reason=error → ChatNodeError(message + code)', () {
+    final nodes = extractNodes([
+      _in(4, 'turn/end', {
+        'turn': 1,
+        'reason': {
+          'kind': 'error',
+          'error': {'message': 'Provider rate limited', 'code': 'RATE_LIMIT'},
+        },
+      }),
+    ]);
+    final err = nodes.single as ChatNodeError;
+    expect(err.message, 'Provider rate limited (RATE_LIMIT)');
+    // message 缺失 → 仅 code;code UNKNOWN 不拼。
+    final codeOnly = extractNodes([
+      _in(5, 'turn/end', {
+        'turn': 1,
+        'reason': {
+          'kind': 'error',
+          'error': {'message': '', 'code': 'TIMEOUT'},
+        },
+      }),
+    ]);
+    expect((codeOnly.single as ChatNodeError).message, 'TIMEOUT');
+    final unknown = extractNodes([
+      _in(6, 'turn/end', {
+        'turn': 1,
+        'reason': {
+          'kind': 'error',
+          'error': {'message': 'boom', 'code': 'UNKNOWN'},
+        },
+      }),
+    ]);
+    expect((unknown.single as ChatNodeError).message, 'boom');
+  });
+
+  test('turn/end reason=max-tokens / interrupted → 各一行提示;completed/blocked 不占位', () {
+    final maxTokens = extractNodes([
+      _in(4, 'turn/end', {
+        'turn': 1,
+        'reason': {'kind': 'max-tokens'},
+      }),
+    ]);
+    final mt = maxTokens.single as ChatNodeNotice;
+    expect(mt.title, '输出已达长度上限');
+
+    final crashed = extractNodes([
+      _in(5, 'turn/end', {
+        'turn': 1,
+        'reason': {'kind': 'interrupted'},
+      }),
+    ]);
+    final cr = crashed.single as ChatNodeNotice;
+    expect(cr.title, '会话异常中断');
+    expect(cr.icon, 'warning');
+
+    for (final kind in ['completed', 'blocked']) {
+      final quiet = extractNodes([
+        _in(6, 'turn/end', {'turn': 1, 'reason': {'kind': kind}}),
+      ]);
+      expect(quiet, isEmpty, reason: kind);
+    }
+  });
+
+  test('aborted 终止原因变体:parent / hook(带 reason)/ 缺 reason', () {
+    String? detailOf(Map<String, dynamic> reason) {
+      final nodes = extractNodes([
+        _in(4, 'turn/end', {'turn': 1, 'reason': reason}),
+      ]);
+      return (nodes.single as ChatNodeNotice).detail;
+    }
+    expect(
+      detailOf({'kind': 'aborted', 'reason': {'kind': 'parent'}}),
+      '父级会话停止',
+    );
+    expect(
+      detailOf({
+        'kind': 'aborted',
+        'reason': {'kind': 'hook', 'reason': 'policy'},
+      }),
+      '钩子停止: policy',
+    );
+    expect(detailOf({'kind': 'aborted'}), isNull);
   });
 }

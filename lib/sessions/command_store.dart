@@ -1,18 +1,20 @@
 // CommandStore — W2-D 斜杠命令体系统一(web commands + skill 菜单合并复刻)。
 //
-// 契约(DSH-PROTOCOL §9 + docs/audit/orchestration.md §1/§3):
-// - commands/list 远程端点:payload 必须为 {args:{agentId}};响应是双层信封
-//   (外层 server-response.result.ok 之后,内层再一层 {ok, value/error},解析剥两层)
-// - commands/list 返回裸数组 [{name, description, input?:{hint}}];
-//   subagent 会话作 agentId → agent-busy(ownership fence)→ 空目录+错误位,
-//   菜单降级为 skill-only(内联提示 + 重试)
-// - commands/execute {agentId, line} 成功返回 void(外层 ok:true 无 value);
-//   未知命令服务端静默吞 → 客户端必须目录内预校验,否则本地拒绝
+// 契约(实测 rc.6 活体主机,POST /api):
+// - commands/list:payload {args:{agentId}};成功响应的 value 是裸数组
+//   [{name, description, input?:{hint}}](typert 直连端点,无内层信封);
+//   业务失败(agent-busy/session-not-found 等)在外层 RpcResult ok:false →
+//   ApiClient 折叠为 RpcBusinessError。subagent 会话作 agentId → agent-busy
+//   (ownership fence)→ 空目录+错误位,菜单降级为 skill-only(内联提示+重试)
+// - commands/execute {args:{agentId, line}} 成功 value 为 {commandId, result}
+//   或缺省(未解析到处理器);未知命令服务端静默吞 → 客户端必须目录内预校验,
+//   否则本地拒绝;结局经 command/run|command/done 生命周期事件进会话日志
 // - 缓存 per-session(只缓存成功目录,失败不缓存,重试=重新拉取);
 //   失效:host/remote-event commands/change 与 agent-preset/selected → 丢弃;
 //   代际翻转(重连)→ 清空全部缓存
 // - skill 源:注入 SkillCatalog(goal_store.dart);listAll 合并 commands + skills
-//   ('/name' 形式)为分组菜单;skill.list 失败 → 技能组静默丢弃(audit §3)
+//   ('/name' 形式)为分组菜单;skill.list 按 sessionId 寻址(主机从会话头解析
+//   项目根目录),失败 → 技能组静默丢弃(audit §3)
 import 'dart:async';
 
 import 'package:singleman/connection/api_client.dart';
@@ -264,7 +266,9 @@ class CommandStore implements CommandStoreView {
     }
     listCalls += 1;
     try {
-      final commands = await api.call<List<CommandEntry>>(
+      // 裸数组 value:必须走 callValue(call 的对象兜底会把数组吞成空 map,
+      // 正是此前「CarrierError(malformed response)」的根因)。
+      final commands = await api.callValue<List<CommandEntry>>(
         CommandMethods.list,
         <String, dynamic>{'args': <String, dynamic>{'agentId': sessionId}},
         parse: _parseCommandList,
@@ -272,13 +276,10 @@ class CommandStore implements CommandStoreView {
       final result = CommandListResult.ok(commands);
       _cache[sessionId] = result;
       return result;
-    } on _InnerError catch (e) {
-      // 内层信封 ok:false(typert 业务错误,如 agent-busy)。
-      return CommandListResult.degraded(CommandListError(e.code, e.message));
     } on RpcBusinessError catch (e) {
-      // 外层 RpcResult ok:false(防御:远程端点也可能在外层拒绝)。
+      // 业务失败在外层 RpcResult ok:false(agent-busy / session-not-found)。
       return CommandListResult.degraded(
-          CommandListError(_rpcErrorCode(e.error), null));
+          CommandListError(_rpcErrorCode(e.error), _rpcErrorMessage(e.error)));
     } on ApiTimeout {
       return CommandListResult.degraded(const CommandListError('timeout', null));
     } on CarrierError catch (e) {
@@ -296,7 +297,7 @@ class CommandStore implements CommandStoreView {
     final result = await listCommands(sessionId, force: force);
     var skills = <SkillEntry>[];
     try {
-      skills = await this.skills.list(force: force);
+      skills = await this.skills.list(sessionId, force: force);
     } catch (_) {
       // skill.list 失败 → 技能组静默丢弃(audit §3:只显示可用组)。
     }
@@ -333,12 +334,12 @@ class CommandStore implements CommandStoreView {
         },
         parse: _parseExecute,
       );
-    } on _InnerError catch (e) {
-      throw CommandExecuteException('命令执行失败: ' +
-          e.code +
-          (e.message == null ? '' : ' ' + e.message!));
     } on RpcBusinessError catch (e) {
-      throw CommandExecuteException('命令执行失败: ' + _rpcErrorCode(e.error));
+      throw CommandExecuteException('命令执行失败: ' +
+          _rpcErrorCode(e.error) +
+          (_rpcErrorMessage(e.error) == null
+              ? ''
+              : ' ' + _rpcErrorMessage(e.error)!));
     } on ApiTimeout {
       throw const CommandExecuteException('命令执行超时');
     } on CarrierError catch (e) {
@@ -346,18 +347,8 @@ class CommandStore implements CommandStoreView {
     }
   }
 
-  /// commands/list 解析:剥双层信封 —— parse 收到内层 {ok, value/error}。
-  static List<CommandEntry> _parseCommandList(Map<String, dynamic> inner) {
-    if (inner['ok'] == false) {
-      final err = inner['error'];
-      throw _InnerError(
-        err is Map<String, dynamic>
-            ? (err['code'] as String? ?? 'unknown')
-            : 'unknown',
-        err is Map<String, dynamic> ? err['message'] as String? : null,
-      );
-    }
-    final value = inner['value'];
+  /// commands/list 解析:value 是裸数组 [{name, description, input?:{hint}}]。
+  static List<CommandEntry> _parseCommandList(dynamic value) {
     if (value is! List) {
       throw const FormatException('commands/list: value 不是数组');
     }
@@ -369,23 +360,19 @@ class CommandStore implements CommandStoreView {
     ];
   }
 
-  /// commands/execute 解析:成功 void(外层 ok:true 无 value);防御内层信封。
-  static void _parseExecute(Map<String, dynamic> inner) {
-    if (inner['ok'] == false) {
-      final err = inner['error'];
-      throw _InnerError(
-        err is Map<String, dynamic>
-            ? (err['code'] as String? ?? 'unknown')
-            : 'unknown',
-        err is Map<String, dynamic> ? err['message'] as String? : null,
-      );
-    }
-  }
+  /// commands/execute 解析:成功 value 为 {commandId, result} 或缺省
+  /// (未解析到处理器);结局经 command/run|done 事件流进会话日志,这里不消费。
+  static void _parseExecute(Map<String, dynamic> inner) {}
 
-  /// RpcError 变体没有统一 code 字段,防御读 toJson()['code']。
+  /// RpcError 变体没有统一 code/message 字段,防御读 toJson()。
   static String _rpcErrorCode(RpcError e) {
     final code = e.toJson()['code'];
     return code is String ? code : 'rpc-error';
+  }
+
+  static String? _rpcErrorMessage(RpcError e) {
+    final message = e.toJson()['message'];
+    return message is String ? message : null;
   }
 
   void _onSnapshot(ConnectionSnapshot snap) {
@@ -413,11 +400,4 @@ class CommandStore implements CommandStoreView {
     await _snapshotsSub?.cancel();
     await _hostSub?.cancel();
   }
-}
-
-/// typert 内层信封的业务错误(code + message 裸 JSON)。
-class _InnerError implements Exception {
-  const _InnerError(this.code, this.message);
-  final String code;
-  final String? message;
 }

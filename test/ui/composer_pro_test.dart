@@ -84,8 +84,9 @@ Future<void> _pump(
 FilledButton _sendBtn(WidgetTester tester) =>
     tester.widget<FilledButton>(find.byKey(_sendKey));
 
-OutlinedButton _stopBtn(WidgetTester tester) =>
-    tester.widget<OutlinedButton>(find.byKey(_stopKey));
+/// 停止按钮本体(外层是 48dp FilledButton;Tooltip/SizedBox 包裹)。
+FilledButton _stopBtn(WidgetTester tester) =>
+    tester.widget<FilledButton>(find.byKey(_stopKey));
 
 String _inputText(WidgetTester tester) =>
     tester.widget<TextField>(find.byKey(_inputKey)).controller!.text;
@@ -154,19 +155,20 @@ void main() {
       expect(_inputText(tester), isEmpty);
     });
 
-    testWidgets('running 模式:按钮变「插话」,tap → onSend(text, steer:true)',
+    testWidgets('running 模式:发送默认进队列(steer:false),按钮仍「发送」(用户诉求)',
         (tester) async {
       final h = _Harness(running: true);
       await _pump(tester, h);
-      expect(find.text('插话'), findsOneWidget);
-      expect(find.text('发送'), findsNothing);
+      // 发送按钮不再因 running 变「插话」—— 插话入口移到队列 Dock。
+      expect(find.text('发送'), findsOneWidget);
+      expect(find.text('插话'), findsNothing);
 
-      await tester.enterText(find.byKey(_inputKey), 'interject');
+      await tester.enterText(find.byKey(_inputKey), 'queued msg');
       await tester.pump();
       await tester.tap(find.byKey(_sendKey));
       await tester.pump();
 
-      expect(h.sends, [(text: 'interject', steer: true)]);
+      expect(h.sends, [(text: 'queued msg', steer: false)]);
     });
 
     testWidgets('空文本/纯空白禁发:按钮禁用,tap 无效', (tester) async {
@@ -189,25 +191,45 @@ void main() {
       expect(_sendBtn(tester).onPressed, isNull);
     });
 
-    testWidgets('停止:running 可用并回调;非 running 禁用;onCancel null 不渲染',
+    testWidgets('停止:running 可用并回调;非 running 不渲染;onCancel null 不渲染',
         (tester) async {
       final h = _Harness(running: true);
       await _pump(tester, h);
+      // 未聚焦 + running:停止出现在输入行内。
       expect(_stopBtn(tester).onPressed, isNotNull);
       await tester.tap(find.byKey(_stopKey));
       await tester.pump();
       expect(h.cancels, 1);
 
+      // 非 running:无事可停,整体不渲染(不再以禁用态占位)。
       final idle = _Harness();
       await _pump(tester, idle);
-      expect(_stopBtn(tester).onPressed, isNull);
-      await tester.tap(find.byKey(_stopKey), warnIfMissed: false);
-      await tester.pump();
+      expect(find.byKey(_stopKey), findsNothing);
       expect(idle.cancels, 0);
 
       final noCancel = _Harness(running: true, withCancel: false);
       await _pump(tester, noCancel);
       expect(find.byKey(_stopKey), findsNothing);
+    });
+
+    testWidgets('停止常显且在最右:聚焦输入框不隐藏,位于发送右侧(用户诉求)',
+        (tester) async {
+      final h = _Harness(running: true);
+      await _pump(tester, h);
+      expect(find.byKey(_stopKey), findsOneWidget);
+
+      // 聚焦(点击输入框):停止不再隐藏 —— 让输入框失焦太麻烦。
+      await tester.tap(find.byKey(_inputKey));
+      await tester.pump();
+      expect(find.byKey(_stopKey), findsOneWidget);
+      expect(find.byKey(_sendKey), findsOneWidget);
+
+      // 顺序:… 输入框 → 发送 → 停止(停止最右侧)。
+      expect(
+        tester.getTopLeft(find.byKey(_sendKey)).dx,
+        lessThan(tester.getTopLeft(find.byKey(_stopKey)).dx),
+        reason: '停止按钮应排在发送按钮右侧(最右)',
+      );
     });
 
     testWidgets('斜杠命令:占位显示 + onCommandIntent 上抛 + 退出斜杠态',
@@ -304,7 +326,8 @@ void main() {
       await tester.pump();
       expect(find.byKey(_errorKey), findsNothing);
       expect(_inputText(tester), isEmpty);
-      expect(h.sends, [(text: 'steer me', steer: true)]);
+      // 发送恒走队列(steer:false)—— 插话入口在队列 Dock,不在 composer。
+      expect(h.sends, [(text: 'steer me', steer: false)]);
     });
 
     testWidgets('错误:agent-busy 映射 + 重新输入即清除', (tester) async {
@@ -381,6 +404,138 @@ void main() {
       expect(tester.getSize(find.byKey(_sendKey)).height, greaterThanOrEqualTo(48));
       expect(tester.getSize(find.byKey(_stopKey)).height, greaterThanOrEqualTo(48));
       expect(tester.getSize(find.byKey(_attachKey)).height, greaterThanOrEqualTo(48));
+    });
+
+    testWidgets('窄屏降级:权限/模型 chip 只显图标,工具行不溢出(用户诉求)',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 700);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(8),
+            child: UpgradeComposer(
+              running: true,
+              canSend: true,
+              onSend: (text, {required steer}) async {},
+              onCancel: () {},
+              onPickImages: () {},
+              onAddCommand: () {},
+              permissionLabel: 'workspace-write',
+              onSwitchPermission: () {},
+              modelLabel: 'DeepSeek-V3.2',
+              onPickModel: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      // 宽度不足:不得出现 RenderFlex 溢出(文本穿透按钮的根因)。
+      expect(tester.takeException(), isNull, reason: '窄屏工具行不得溢出');
+      // 降级:权限 chip 仅图标(文案让位),模型 chip 隐藏,发送收成图标。
+      expect(find.byIcon(Icons.edit_note_outlined), findsOneWidget,
+          reason: '权限图标仍在(仅图标形态)');
+      expect(find.text('工作区可写'), findsNothing);
+      expect(find.byIcon(Icons.memory), findsNothing, reason: '极窄:模型 chip 隐藏');
+      expect(find.text('DeepSeek-V3.2'), findsNothing);
+      expect(find.byIcon(Icons.send), findsOneWidget, reason: '发送图标仍在');
+      expect(find.text('发送'), findsNothing, reason: '极窄:发送收成图标');
+      // 停止/图片/命令按钮不受降级影响。
+      expect(find.byKey(_stopKey), findsOneWidget);
+      expect(find.byKey(_attachKey), findsOneWidget);
+    });
+
+    testWidgets('中等宽度:chip 图标化但保留发送文案与模型 chip', (tester) async {
+      tester.view.physicalSize = const Size(412, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(8),
+            child: UpgradeComposer(
+              running: true,
+              canSend: true,
+              onSend: (text, {required steer}) async {},
+              onCancel: () {},
+              onPickImages: () {},
+              onAddCommand: () {},
+              permissionLabel: 'workspace-write',
+              onSwitchPermission: () {},
+              modelLabel: 'DeepSeek-V3.2',
+              onPickModel: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      // 余量不足以带文案(约 128 < 220)→ 图标化;但 ≥100 → 模型保留、发送带文案。
+      expect(find.byIcon(Icons.edit_note_outlined), findsOneWidget);
+      expect(find.text('工作区可写'), findsNothing);
+      expect(find.byIcon(Icons.memory), findsOneWidget);
+      expect(find.text('发送'), findsOneWidget);
+    });
+
+    testWidgets('宽屏:权限/模型 chip 带完整文案', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(8),
+            child: UpgradeComposer(
+              running: false,
+              canSend: true,
+              onSend: (text, {required steer}) async {},
+              onPickImages: () {},
+              onAddCommand: () {},
+              permissionLabel: 'workspace-write',
+              onSwitchPermission: () {},
+              modelLabel: 'DeepSeek-V3.2',
+              onPickModel: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('工作区可写'), findsOneWidget);
+      expect(find.text('DeepSeek-V3.2'), findsOneWidget);
+      expect(find.text('发送'), findsOneWidget);
+      expect(find.byIcon(Icons.memory), findsOneWidget);
+    });
+
+    testWidgets('输入框形态:placeholder 单行省略,无左侧图标,停止与发送同为 48dp 填充按钮',
+        (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final h = _Harness(running: true);
+      await _pump(tester, h);
+      final input = tester.widget<TextField>(find.byKey(_inputKey));
+
+      // placeholder 用 hint widget 强制单行(hintText 字符串会随 maxLines 折行)。
+      final hint = input.decoration?.hint;
+      expect(hint, isA<Text>());
+      expect((hint as Text).maxLines, 1, reason: 'placeholder 恒单行,不撑高默认输入框');
+      expect(hint.overflow, TextOverflow.ellipsis);
+      expect(hint.data, '输入消息');
+
+      // 左侧不放多余图标。
+      expect(input.decoration?.prefixIcon, isNull);
+
+      // 停止与发送同为 FilledButton 且等大(视觉协调)。
+      expect(tester.widget<FilledButton>(find.byKey(_stopKey)), isNotNull);
+      expect(tester.getSize(find.byKey(_stopKey)), const Size(48, 48));
+      expect(tester.getSize(find.byKey(_sendKey)).height, 48);
+      // 单行 placeholder 下空输入框高度收敛(两行 hint 曾把默认高度撑到 60+)。
+      expect(tester.getSize(find.byKey(_inputKey)).height, lessThan(56));
     });
   });
 }

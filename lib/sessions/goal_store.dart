@@ -53,11 +53,13 @@ class SkillCatalog {
   final ApiClient api;
   List<SkillEntry>? _cache;
 
-  Future<List<SkillEntry>> list({bool force = false}) {
+  /// 拉取技能目录。sessionId 必填:主机从会话头解析项目根目录
+  /// (实测 rc.6:缺 sessionId 直接 bad-request)。
+  Future<List<SkillEntry>> list(String sessionId, {bool force = false}) {
     if (!force && _cache != null) return Future.value(_cache);
     return api.call(
       RpcMethods.skillList,
-      <String, dynamic>{},
+      <String, dynamic>{'sessionId': sessionId},
       parse: SkillListValue.fromJson,
     ).then((v) => _cache = v.skills);
   }

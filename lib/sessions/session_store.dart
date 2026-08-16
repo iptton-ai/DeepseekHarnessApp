@@ -5,6 +5,11 @@
 // - session.history 尾页(beforeSeq 缺席)装载事件日志 + projections 水位
 // - mux session/event 增量按 seq 去重追加(重连重放安全)
 // - session/projection 高 seq 覆盖低 seq;host/session-status 折叠 running
+// - 多客户端折叠(2026-08-15 bug 修复,对齐 web recordMutation 语义):
+//   host/session-added → 新会话即时入列(web 端新建的手机可见);
+//   host/session-removed → 普通会话移出、subagent 只折 running;
+//   user/message 事件 → 摘要 updatedAt 推进(终止会话被 web 端重启后
+//   手机侧栏时间/运行态随之刷新 —— 此前完全不更新,即本修复的 bug)
 // - session.prompt(mode:queue)上行
 //
 // 上层(UI)只消费广播流,不碰 wire。
@@ -101,6 +106,9 @@ abstract class SessionStoreView {
 
   /// 向前补一页更早历史(无更早时 no-op)。
   Future<void> loadOlder(String sessionId);
+
+  /// 从 atSeq 锚点分叉子会话,返回子会话 id(web 消息操作区「分叉」)。
+  Future<String> fork(String sessionId, {int? atSeq});
 }
 
 class SessionStore implements SessionStoreView {
@@ -114,6 +122,18 @@ class SessionStore implements SessionStoreView {
   late final StreamController<List<SessionSummary>> _summariesController;
   final Map<String, SessionLog> _logs = <String, SessionLog>{};
   List<SessionSummary> _summaries = <SessionSummary>[];
+
+  // 会话投影 overlay(复刻 rc.6 web ProjectionValueStore):
+  // host 是唯一计算点(title 的 fallback=首条用户消息前 N 词、LLM 摘要
+  // 均在 host 侧落成 session/title 事件),客户端只收整值 ——
+  // session/list 行内基线、session/history 尾页块、session/projection 推送
+  // 帧、rename 回执四路汇入,单一规则「高 seq 覆盖低 seq」。
+  // 侧栏读摘要流,不读懒注册的日志 —— 没有这层 overlay,标题永远停在
+  // list 快照(回落 cwd 目录名),fallback→LLM 摘要的演进不可见。
+  final Map<String, Map<String, dynamic>> _projectionValues =
+      <String, Map<String, dynamic>>{};
+  final Map<String, Map<String, int>> _projectionSeqs =
+      <String, Map<String, int>>{};
   StreamSubscription<ConnectionSnapshot>? _snapshotsSub;
   StreamSubscription<MuxFrame>? _muxSub;
   StreamSubscription<HostFrame>? _hostSub;
@@ -125,7 +145,9 @@ class SessionStore implements SessionStoreView {
   Stream<List<SessionSummary>> get summaries => _summariesController.stream;
 
   /// 当前快照。
-  List<SessionSummary> get currentSummaries => List<SessionSummary>.unmodifiable(_summaries);
+  /// 当前快照(已合并投影 overlay;title 等键为最新值)。
+  List<SessionSummary> get currentSummaries =>
+      List<SessionSummary>.unmodifiable(_projectedSummaries(_summaries));
 
   /// 取(或建)某会话的日志。
   SessionLog logFor(String sessionId) => _logs.putIfAbsent(sessionId, () => SessionLog(sessionId));
@@ -168,21 +190,130 @@ class SessionStore implements SessionStoreView {
 
   bool _disposed = false;
 
-  /// 全量重取会话列表。
-  Future<void> refresh() async {
-    if (_disposed) return;
-    final value = await api.call(
-      RpcMethods.sessionList,
-      <String, dynamic>{},
-      parse: SessionListValue.fromJson,
-    );
-    _summaries = value.items;
-    if (!_summariesController.isClosed) {
-      _summariesController.add(List<SessionSummary>.unmodifiable(_summaries));
+  /// 投影单键落地(高 seq 覆盖低 seq;低/等 seq 丢弃,重放帧零副作用)。
+  /// 返回是否有键值更新(调用方据此决定是否重发摘要流)。
+  bool _applyProjectionValue(String sessionId, String key, dynamic value, int seq) {
+    final seqs = _projectionSeqs.putIfAbsent(sessionId, () => <String, int>{});
+    if ((seqs[key] ?? -1) >= seq) return false;
+    seqs[key] = seq;
+    _projectionValues.putIfAbsent(sessionId, () => <String, dynamic>{})[key] = value;
+    return true;
+  }
+
+  /// 把 overlay 合并进摘要列表(仅重建有新键值的行;无 overlay 原样返回)。
+  List<SessionSummary> _projectedSummaries(List<SessionSummary> items) {
+    if (_projectionValues.isEmpty) return items;
+    return [
+      for (final s in items) _mergeOne(s),
+    ];
+  }
+
+  SessionSummary _mergeOne(SessionSummary s) {
+    final overlay = _projectionValues[s.sessionId];
+    if (overlay == null || overlay.isEmpty) return s;
+    final seqs = _projectionSeqs[s.sessionId] ?? const <String, int>{};
+    final base = s.projections?.values ?? const <String, dynamic>{};
+    // overlay 即读路径(web ProjectionValueStore 语义):refresh 已把行内
+    // 块 per-key 应用进 overlay(此后 overlay seq >= 块水位),推送帧只在
+    // 更高 seq 时改写 —— 因此 overlay 键无条件胜出行块值。列表块是
+    // 「部分基线」(冷缓存只带 version-matching 键;活体实测 rc.6 host
+    // 的 list 行可带 6+ 键但唯独缺 title,且 asOfSeq 很高),缺席的键
+    // 不能凭块级水位清掉已收到的 title —— 那正是「标题变回目录名」
+    // 的根因:块 asOfSeq(= 各键最低水位或日志尾)高于 overlay title
+    // seq 时,旧门槛判据把 title 丢掉,显示回落 cwd 目录名。
+    final merged = <String, dynamic>{...base, ...overlay};
+    var asOf = s.projections?.asOfSeq ?? -1;
+    for (final entry in overlay.entries) {
+      final seq = seqs[entry.key] ?? -1;
+      if (seq > asOf) asOf = seq;
     }
-    listCalls += 1;
-    // 懒注册:不预建日志 —— 会话在 UI 打开(logFor/loadHistory)时才登记;
-    // 已存在日志靠 seq 去重天然保留(重连重取安全)。
+    return SessionSummary(
+      sessionId: s.sessionId,
+      updatedAt: s.updatedAt,
+      running: s.running,
+      blank: s.blank,
+      parentSessionId: s.parentSessionId,
+      origin: s.origin,
+      cwd: s.cwd,
+      agentPreset: s.agentPreset,
+      projections: SessionProjectionsBlock(asOfSeq: asOf, values: merged),
+    );
+  }
+
+  /// 重发摘要流(投影/状态帧后调用,侧栏即时更新)。
+  void _emitSummaries() {
+    if (_summariesController.isClosed) return;
+    _summariesController.add(
+      List<SessionSummary>.unmodifiable(_projectedSummaries(_summaries)),
+    );
+  }
+
+  /// 全量重取会话列表。
+  ///
+  /// 并发合并(web manager listInflight 同构):同一时刻只允许一个
+  /// session.list 在飞,后续调用共享同一次往返 —— 两个并发响应乱序
+  /// 落地时,陈旧快照会把已应用的新状态整体盖回去。
+  Future<void> refresh() {
+    if (_disposed) return Future<void>.value();
+    return _refreshInFlight ??= _doRefresh();
+  }
+
+  Future<void>? _refreshInFlight;
+
+  /// 拉取期间到达的变更帧缓存(响应落地后按序重放;web listMutations)。
+  List<void Function()> _pendingMutations = <void Function()>[];
+
+  /// 变更帧在拉取在飞时登记重放(HTTP 响应慢于 WS 帧时,快照里是旧值;
+  /// 不重放会把已折叠的变更覆盖回去 —— running=false 已到却被快照里的
+  /// true 盖回,侧栏 loading 永久卡死,即用户实报 bug)。
+  void _recordMutation(void Function() replay) {
+    if (_refreshInFlight != null) _pendingMutations.add(replay);
+  }
+
+  Future<void> _doRefresh() async {
+    try {
+      final value = await api.call(
+        RpcMethods.sessionList,
+        <String, dynamic>{},
+        parse: SessionListValue.fromJson,
+      );
+      if (_disposed) return;
+      _summaries = value.items;
+      // 行内投影基线 seed 进 overlay(冷会话的持久化缓存行,可能滞后但不错;
+      // asOfSeq 标明多旧),再由 overlay 统一投影回摘要。
+      final alive = <String>{};
+      for (final s in _summaries) {
+        alive.add(s.sessionId);
+        final block = s.projections;
+        if (block == null) continue;
+        for (final key in block.values.keys) {
+          _applyProjectionValue(s.sessionId, key, block.values[key], block.asOfSeq);
+        }
+      }
+      // 已消失会话的 overlay 行回收(防长期增长)。
+      _projectionValues.removeWhere((id, _) => !alive.contains(id));
+      _projectionSeqs.removeWhere((id, _) => !alive.contains(id));
+      // 基线落地 → 重放拉取期间到达的变更。先清在飞标记:重放的折叠
+      // 会再过 _recordMutation,不得二次登记(否则自增殖)。
+      _refreshInFlight = null;
+      final pending = _pendingMutations;
+      _pendingMutations = <void Function()>[];
+      for (final replay in pending) {
+        replay();
+      }
+      _emitSummaries();
+      listCalls += 1;
+      // 懒注册:不预建日志 —— 会话在 UI 打开(logFor/loadHistory)时才登记;
+      // 已存在日志靠 seq 去重天然保留(重连重取安全)。
+    } catch (_) {
+      // 失败的拉取不落地基线:本轮登记的变更无需重放 —— 帧到达时的直接
+      // 折叠已生效,下一次拉取的快照比它们新(web:失败拉取的
+      // listMutations 作废;跨拉取重放反而会用陈旧值覆盖新快照)。
+      _pendingMutations = <void Function()>[];
+      rethrow;
+    } finally {
+      _refreshInFlight = null;
+    }
   }
 
   /// 装载历史尾页(beforeSeq 缺席 = 最新 50 条,附带 projections 水位快照)。
@@ -214,7 +345,21 @@ class SessionStore implements SessionStoreView {
         maxMessages: maxMessages ?? 50, beforeSeq: earliest);
   }
 
+  /// session.history 单次尝试的时限。历史装载走主机事件日志回放,大日志/
+  /// 冷启动时可能超过 30s 默认 unary 超时(实测 ApiTimeout 即此因),放宽到 45s。
+  static const Duration _kHistoryTimeout = Duration(seconds: 45);
+
+  /// 瞬时故障(超时/载波)自动重试次数(含首次共 3 次)与退避间隔。
+  /// 业务错误(RpcBusinessError,如 session-not-found)不重试,直接上抛。
+  static const int _kHistoryAttempts = 3;
+  static const List<Duration> _kHistoryBackoff = [
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1500),
+  ];
+
   /// 拉单页并落地;返回服务端 hasMore(空页视作无更多)。
+  /// 超时/载波故障自动退避重试,重试耗尽抛最后错误(调用方决定提示与
+  /// 手动重试入口 —— 见 ChatViewModel.retryHistory)。
   Future<bool> _fetchPage(
     String sessionId,
     SessionLog log, {
@@ -226,23 +371,68 @@ class SessionStore implements SessionStoreView {
       'maxMessages': maxMessages,
       if (beforeSeq != null) 'beforeSeq': beforeSeq,
     };
-    final value = await api.call(
-      RpcMethods.sessionHistory,
-      payload,
-      parse: SessionHistoryValue.fromJson,
-    );
-    log.appendAll([for (final entry in value.events) entry.event]);
-    final block = value.projections;
-    if (block != null) {
-      for (final key in block.values.keys) {
-        log.projections[key] = block.values[key];
+    Object? lastError;
+    for (var attempt = 0; attempt < _kHistoryAttempts; attempt++) {
+      try {
+        final value = await api.call(
+          RpcMethods.sessionHistory,
+          payload,
+          parse: SessionHistoryValue.fromJson,
+          timeout: _kHistoryTimeout,
+        );
+        log.appendAll([for (final entry in value.events) entry.event]);
+        final block = value.projections;
+        var overlayChanged = false;
+        if (block != null) {
+          for (final key in block.values.keys) {
+            log.projections[key] = block.values[key];
+            // 尾页投影块同样 seed overlay(web installWindow → store.seed):
+            // 打开一个冷会话,其侧栏行标题随即对齐持久化缓存值。
+            if (_applyProjectionValue(
+              sessionId,
+              key,
+              block.values[key],
+              block.asOfSeq,
+            )) {
+              overlayChanged = true;
+            }
+          }
+          // 尾页块是「全量基线」(host 侧所有已注册投影键的一致切面,
+          // 与 list 行的部分基线不同):块中缺席且 seq 不高于切面的
+          // overlay 键 = 该能力在切面处已缺席,清除防幻影键
+          // (web seed 的 clear 分支);更新的推送帧(seq > 切面)保留。
+          final valuesMap = _projectionValues[sessionId];
+          final seqsMap = _projectionSeqs[sessionId];
+          if (valuesMap != null && seqsMap != null) {
+            final dead = <String>[
+              for (final key in valuesMap.keys)
+                if (!block.values.containsKey(key) &&
+                    (seqsMap[key] ?? -1) <= block.asOfSeq)
+                  key,
+            ];
+            for (final key in dead) {
+              valuesMap.remove(key);
+              seqsMap.remove(key);
+              overlayChanged = true;
+            }
+          }
+          if (block.asOfSeq > log.projectionWatermark) {
+            log.projectionWatermark = block.asOfSeq;
+          }
+        }
+        if (overlayChanged) _emitSummaries();
+        log.hasOlder = value.hasMore && value.events.isNotEmpty;
+        return log.hasOlder;
+      } on ApiTimeout catch (e) {
+        lastError = e;
+      } on CarrierError catch (e) {
+        lastError = e;
       }
-      if (block.asOfSeq > log.projectionWatermark) {
-        log.projectionWatermark = block.asOfSeq;
+      if (attempt < _kHistoryAttempts - 1) {
+        await Future<void>.delayed(_kHistoryBackoff[attempt]);
       }
     }
-    log.hasOlder = value.hasMore && value.events.isNotEmpty;
-    return log.hasOlder;
+    throw lastError!;
   }
 
   /// workspace.list(只读;M2 UI 的会话创建入口之一)。
@@ -265,6 +455,15 @@ class SessionStore implements SessionStoreView {
       parse: SessionCreateValue.fromJson,
     );
     logFor(value.sessionId);
+    // 合成 upsert 登记(web create 后 recordMutation 同构):refresh 已并
+    // 发合并,若共享的在飞拉取快照早于本次创建,响应里没有新会话 ——
+    // 基线落地后重放此记录保证新行可见。
+    _recordMutation(() => _mergeAddedFields(
+          sessionId: value.sessionId,
+          blank: true,
+          cwd: cwd,
+          agentPreset: value.agentPreset,
+        ));
     unawaited(refresh());
     return value;
   }
@@ -301,6 +500,11 @@ class SessionStore implements SessionStoreView {
         parse: SessionSearchValue.fromJson,
       );
 
+  /// 窄视图适配:返回子会话 id(VM 直接切换到子会话,对齐 web open(childId))。
+  @override
+  Future<String> fork(String sessionId, {int? atSeq}) async =>
+      (await forkSession(sessionId, atSeq: atSeq)).sessionId;
+
   /// session.fork:atSeq 锚点须映射到已闭合 turn(turn 未闭合 → fork-unavailable)。
   /// fork 后 refresh(新会话入列)。
   Future<SessionForkValue> forkSession(String sessionId, {int? atSeq}) async {
@@ -313,6 +517,7 @@ class SessionStore implements SessionStoreView {
       parse: SessionForkValue.fromJson,
     );
     logFor(value.sessionId);
+    _recordMutation(() => _mergeAddedFields(sessionId: value.sessionId, blank: true));
     unawaited(refresh().catchError((Object _) {}));
     return value;
   }
@@ -326,9 +531,13 @@ class SessionStore implements SessionStoreView {
       parse: SessionRenameValue.fromJson,
     );
     // 显式用户动作 → 登记日志(懒注册的例外:受用户操作次数约束,不受帧流量约束);
-    // 登记后服务端投影回声帧才能落地。
+    // 登记后服务端投影回声帧才能落地。title 投影值是**纯字符串**
+    // (rc.6 wire:SessionProjectionMap['title']: string | null),非嵌套 map。
     final log = logFor(sessionId);
-    log.applyProjection('title', <String, dynamic>{'title': value.title}, value.seq);
+    log.applyProjection('title', value.title, value.seq);
+    if (_applyProjectionValue(sessionId, 'title', value.title, value.seq)) {
+      _emitSummaries();
+    }
     unawaited(refresh().catchError((Object _) {}));
     return value;
   }
@@ -412,37 +621,182 @@ class SessionStore implements SessionStoreView {
     // 长连接下内存无界增长;未打开会话的历史在打开时按页拉取即可。
     if (frame is MuxFrameSessionEvent) {
       _logs[frame.sessionId]?.append(frame.event);
+      // 活动折叠(复刻 web recordMutation 'activity'):任何客户端(含 web 端)
+      // 直发的用户消息都推进摘要 updatedAt —— 侧栏「最后会话时间」的数据源。
+      // 不做这步,终止会话被 web 端重启后,手机侧该行永远停在旧时间。
+      if (frame.event.type == 'user/message' && frame.event.data is Map) {
+        final source = (frame.event.data as Map)['source'];
+        if (source is Map && source['kind'] == 'user') {
+          _bumpActivity(frame.sessionId, frame.event.time);
+        }
+      }
     } else if (frame is MuxFrameSessionProjection) {
       _logs[frame.sessionId]
           ?.applyProjection(frame.key, frame.value, frame.seq);
+      // overlay 无条件落地(不限已打开会话 —— web 语义:标题投影对整个
+      // 列表生效,侧栏未打开的会话也要随 fallback→LLM 摘要演进刷新)。
+      if (_applyProjectionValue(
+        frame.sessionId,
+        frame.key,
+        frame.value,
+        frame.seq,
+      )) {
+        _emitSummaries();
+      }
     }
     // session/subscribed 水位、queue/jobs 快照收敛:M3 再折叠。
   }
 
   void _onHostFrame(HostFrame frame) {
     if (frame is HostFrameHostSessionStatus) {
-      final idx = _summaries.indexWhere((s) => s.sessionId == frame.sessionId);
-      if (idx >= 0) {
-        // SessionSummary 是不可变 wire 模型;重建列表项(running 翻转)。
-        final old = _summaries[idx];
-        final updated = SessionSummary(
-          sessionId: old.sessionId,
-          updatedAt: old.updatedAt,
-          running: frame.running,
-          blank: old.blank,
-          parentSessionId: old.parentSessionId,
-          origin: old.origin,
-          cwd: old.cwd,
-          agentPreset: old.agentPreset,
-          projections: old.projections,
-        );
-        final next = List<SessionSummary>.of(_summaries);
-        next[idx] = updated;
-        _summaries = next;
-        if (!_summariesController.isClosed) {
-          _summariesController.add(List<SessionSummary>.unmodifiable(_summaries));
-        }
-      }
+      _applyStatusFlip(frame.sessionId, frame.running);
+    } else if (frame is HostFrameHostSessionAdded) {
+      _mergeAddedSession(frame);
+    } else if (frame is HostFrameHostSessionRemoved) {
+      _removeSummary(frame.sessionId);
     }
+  }
+
+  /// running 翻转(复刻 web applyMutation 'status'):running=true 清 blank
+  /// (首 turn 开跑即非空会话);同值重放(重连重放帧)零副作用。
+  void _applyStatusFlip(String sessionId, bool running) {
+    _recordMutation(() => _applyStatusFlip(sessionId, running));
+    final idx = _summaries.indexWhere((s) => s.sessionId == sessionId);
+    if (idx < 0) return;
+    final old = _summaries[idx];
+    if (old.running == running && !(running && old.blank)) return;
+    // SessionSummary 是不可变 wire 模型;重建列表项(running/blank 翻转)。
+    final updated = SessionSummary(
+      sessionId: old.sessionId,
+      updatedAt: old.updatedAt,
+      running: running,
+      blank: old.blank && !running,
+      parentSessionId: old.parentSessionId,
+      origin: old.origin,
+      cwd: old.cwd,
+      agentPreset: old.agentPreset,
+      projections: old.projections,
+    );
+    final next = List<SessionSummary>.of(_summaries);
+    next[idx] = updated;
+    _summaries = next;
+    _emitSummaries();
+  }
+
+  /// host/session-added 并入(复刻 web mergeSummary upsert):任何客户端新建
+  /// 的会话(含 web 端)即时入列 —— 不做这步,web 端新开的会话在手机侧栏
+  /// 要等到下次重连 refresh 才出现。已存在的行(与 refresh 竞态)只补缺失
+  /// 字段,绝不覆盖列表刷新带来的数据。
+  void _mergeAddedSession(HostFrameHostSessionAdded frame) {
+    _recordMutation(() => _mergeAddedSession(frame));
+    _mergeAddedFields(
+      sessionId: frame.sessionId,
+      blank: frame.blank,
+      parentSessionId: frame.parentSessionId,
+      origin: frame.origin,
+      cwd: frame.cwd,
+      agentPreset: frame.agentPreset,
+    );
+  }
+
+  /// added/upsert 折叠本体(host/session-added 帧、create/fork 合成记录共用)。
+  void _mergeAddedFields({
+    required String sessionId,
+    required bool blank,
+    String? parentSessionId,
+    String? origin,
+    String? cwd,
+    String? agentPreset,
+  }) {
+    final idx = _summaries.indexWhere((s) => s.sessionId == sessionId);
+    if (idx < 0) {
+      _summaries = <SessionSummary>[
+        SessionSummary(
+          sessionId: sessionId,
+          updatedAt: DateTime.now().millisecondsSinceEpoch.toDouble(),
+          running: false,
+          blank: blank,
+          parentSessionId: parentSessionId,
+          origin: origin,
+          cwd: cwd,
+          agentPreset: agentPreset,
+        ),
+        ..._summaries,
+      ];
+      _emitSummaries();
+      return;
+    }
+    final old = _summaries[idx];
+    final mergedBlank = old.blank && blank;
+    final mergedParent = old.parentSessionId ?? parentSessionId;
+    final mergedOrigin = old.origin ?? origin;
+    final mergedCwd = old.cwd ?? cwd;
+    final mergedPreset = old.agentPreset ?? agentPreset;
+    if (old.blank == mergedBlank &&
+        old.parentSessionId == mergedParent &&
+        old.origin == mergedOrigin &&
+        old.cwd == mergedCwd &&
+        old.agentPreset == mergedPreset) {
+      return; // 竞态后到帧无新信息:零副作用
+    }
+    final next = List<SessionSummary>.of(_summaries);
+    next[idx] = SessionSummary(
+      sessionId: old.sessionId,
+      updatedAt: old.updatedAt,
+      running: old.running,
+      blank: mergedBlank,
+      parentSessionId: mergedParent,
+      origin: mergedOrigin,
+      cwd: mergedCwd,
+      agentPreset: mergedPreset,
+      projections: old.projections,
+    );
+    _summaries = next;
+    _emitSummaries();
+  }
+
+  /// host/session-removed(复刻 web durableSubagent 语义):subagent 会话在
+  /// host 侧 dispose 后仍可从磁盘 resume,只折叠 running 不删行;普通会话
+  /// 即时移出并回收投影 overlay(防幽灵行 + 防长期增长)。
+  void _removeSummary(String sessionId) {
+    _recordMutation(() => _removeSummary(sessionId));
+    final idx = _summaries.indexWhere((s) => s.sessionId == sessionId);
+    if (idx < 0) return;
+    if (_summaries[idx].origin == 'subagent') {
+      _applyStatusFlip(sessionId, false);
+      return;
+    }
+    _summaries = <SessionSummary>[
+      for (var i = 0; i < _summaries.length; i++)
+        if (i != idx) _summaries[i],
+    ];
+    _projectionValues.remove(sessionId);
+    _projectionSeqs.remove(sessionId);
+    _emitSummaries();
+  }
+
+  /// 活动时间推进(复刻 web applyMutation 'activity'):只前进不回退,
+  /// 重连重放的同事件(同 time)天然零副作用。
+  void _bumpActivity(String sessionId, double time) {
+    _recordMutation(() => _bumpActivity(sessionId, time));
+    final idx = _summaries.indexWhere((s) => s.sessionId == sessionId);
+    if (idx < 0) return;
+    final old = _summaries[idx];
+    if (time <= old.updatedAt) return;
+    final updated = SessionSummary(
+      sessionId: old.sessionId,
+      updatedAt: time,
+      running: old.running,
+      blank: old.blank,
+      parentSessionId: old.parentSessionId,
+      origin: old.origin,
+      cwd: old.cwd,
+      agentPreset: old.agentPreset,
+      projections: old.projections,
+    );
+    final next = List<SessionSummary>.of(_summaries);
+    next[idx] = updated;
+    _summaries = next;
+    _emitSummaries();
   }
 }

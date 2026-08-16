@@ -1,11 +1,10 @@
 // 连接配置页(M4 LAN 形态,ADR-0004;M6 增远程网关形态):
 // - 桌面同机:直接进主界面(loopback 3080,全功能)
 // - 手机 LAN:先输入主机地址(必须 --host <具体IP> + --trusted-host 启动的 dsh)
-// - 手机公网:经远程网关(密码登录 + 设备令牌;M6)
+// - 手机公网:经远程网关(配对 + 设备令牌;M6.1)
 // - 特权围栏:非 loopback 且非已鉴权远程时,按 host.describe 能力隐藏特权面
 //   (方法级 403 由服务端把关,客户端只做 UI 隐藏 —— DSH-PROTOCOL §6:可达性策略不是认证)
 import 'package:flutter/material.dart';
-import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 特权面可见性:loopback 或「经网关鉴权的远程」连接可见。
 class PrivilegeScope {

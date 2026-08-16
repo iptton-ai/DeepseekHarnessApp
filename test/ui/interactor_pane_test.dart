@@ -21,6 +21,10 @@ import 'package:singleman/wire/generated/wire_generated.dart';
 class _RecordingApi extends ApiClient {
   _RecordingApi() : super(baseUri: Uri.parse('http://localhost:1'));
   final responds = <Map<String, dynamic>>[];
+
+  /// 普通 RPC 调用记录(method + payload),返回 accepted。
+  final rpcCalls = <(String, Map<String, dynamic>)>[];
+
   /// 应答回执:true = accepted;false = not-pending(迟到)。
   bool acceptNext = true;
 
@@ -32,6 +36,17 @@ class _RecordingApi extends ApiClient {
     return acceptNext
         ? {'accepted': true}
         : {'accepted': false, 'reason': 'not-pending'};
+  }
+
+  @override
+  Future<T> call<T>(
+    String method,
+    Map<String, dynamic> payload, {
+    required T Function(Map<String, dynamic> json) parse,
+    Duration? timeout,
+  }) async {
+    rpcCalls.add((method, payload));
+    return parse(<String, dynamic>{'accepted': true});
   }
 }
 
@@ -54,6 +69,10 @@ class _FakeSessionView implements SessionStoreView {
   Future<void> loadHistory(String sessionId) async {}
   @override
   Future<void> loadOlder(String sessionId) async {}
+
+  @override
+  Future<String> fork(String sessionId, {int? atSeq}) async => 'forked';
+
 }
 
 SessionSummary _summary(String id) => SessionSummary(
@@ -243,7 +262,7 @@ void main() {
     expect(api.responds, hasLength(1));
   });
 
-  testWidgets('迟到应答(not-pending)→ 表单内联提示', (tester) async {
+  testWidgets('迟到应答(not-pending)→ 权威清场,表单消失(不再滞留)', (tester) async {
     feedQuestion('qr-late');
     await pumpScreen(tester);
     api.acceptNext = false; // 服务端回执 not-pending
@@ -251,7 +270,10 @@ void main() {
     await tester.pump();
     await submit(tester);
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.textContaining('已被处理'), findsOneWidget);
+    // not-pending = host 已 resolved(另一端先答)且 resolved 帧大概率已
+    // 错过 —— 回执即最后的权威清场信号,表单立即卸载,不留滞留卡。
+    expect(find.text('继续吗?'), findsNothing);
+    expect(find.text('代理提问'), findsNothing);
   });
 
   testWidgets('审批卡:帧先到后挂载也渲染;应答走按钮回调', (tester) async {
@@ -299,7 +321,7 @@ void main() {
     expect(find.text('继续吗?'), findsNWidgets(2));
   });
 
-  testWidgets('队列 Dock:切会话后从快照重读(不漏不串)', (tester) async {
+  testWidgets('队列 Dock:切会话后从快照重读(不漏不串);仅显示 queued 项', (tester) async {
     sessions.emit([_summary('session-s1'), _summary('session-s2')]);
     await pumpScreen(tester);
     store.debugFeed(AddressedMuxFrame(
@@ -308,11 +330,20 @@ void main() {
         sessionId: 'session-s2',
         items: [
           {
-            'itemId': 'qi-1',
-            'placement': 'steering',
+            'id': 'qi-1',
+            'placement': 'queued',
             'message': {
               'content': [
                 {'type': 'text', 'text': '先看这个'},
+              ],
+            },
+          },
+          {
+            'id': 'qi-2',
+            'placement': 'steering',
+            'message': {
+              'content': [
+                {'type': 'text', 'text': '正在插话'},
               ],
             },
           },
@@ -326,5 +357,81 @@ void main() {
     vm.select('session-s2');
     await tester.pump();
     expect(find.textContaining('先看这个'), findsOneWidget);
+    // web QueueDock 同款:仅 queued 项入 Dock,steering/context 不显示。
+    expect(find.textContaining('正在插话'), findsNothing);
+  });
+
+  testWidgets('队列 Dock:插话按钮仅 running 可用,点击走 updateQueue steer', (tester) async {
+    sessions.emit([
+      SessionSummary(
+        sessionId: 'session-s1',
+        updatedAt: 1786760000000,
+        running: true,
+        blank: false,
+      ),
+    ]);
+    await pumpScreen(tester);
+    store.debugFeed(AddressedMuxFrame(
+      rpcId: 'queue-2',
+      frame: MuxFrameSessionQueue(
+        sessionId: 'session-s1',
+        items: [
+          {
+            'id': 'qi-9',
+            'placement': 'queued',
+            'message': {
+              'content': [
+                {'type': 'text', 'text': '排着队呢'},
+              ],
+            },
+          },
+        ],
+      ),
+    ));
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // running:插话按钮可用,点击 → session.updateQueue kind:'steer'。
+    final steerBtn = find.byTooltip('插话发送');
+    expect(steerBtn, findsOneWidget);
+    await tester.ensureVisible(steerBtn);
+    await tester.pump();
+    await tester.tap(steerBtn);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(api.rpcCalls, hasLength(1));
+    final (method, payload) = api.rpcCalls.single;
+    expect(method, 'session.updateQueue');
+    expect(payload['sessionId'], 'session-s1');
+    expect(payload['itemId'], 'qi-9');
+    expect((payload['action'] as Map)['kind'], 'steer');
+  });
+
+  testWidgets('队列 Dock:非 running 插话按钮禁用(不产生 RPC)', (tester) async {
+    sessions.emit([_summary('session-s1')]); // running: false
+    await pumpScreen(tester);
+    store.debugFeed(AddressedMuxFrame(
+      rpcId: 'queue-3',
+      frame: MuxFrameSessionQueue(
+        sessionId: 'session-s1',
+        items: [
+          {
+            'id': 'qi-8',
+            'placement': 'queued',
+            'message': {
+              'content': [
+                {'type': 'text', 'text': '闲置队列'},
+              ],
+            },
+          },
+        ],
+      ),
+    ));
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // 按钮 rendered 但禁用(tooltip 说明原因),点击无 RPC。
+    final steerBtn = find.byTooltip('仅运行中可插话发送');
+    expect(steerBtn, findsOneWidget);
+    await tester.tap(steerBtn, warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(api.rpcCalls, isEmpty);
   });
 }

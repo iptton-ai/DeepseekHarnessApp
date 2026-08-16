@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "module description"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DshAPP"
+    },
+    {
+      "name": "camera_permission_reason",
+      "value": "Used to scan the pairing QR code to connect to your computer (host); not used for taking photos or recording video."
+    }
+  ]
+}

@@ -9,6 +9,9 @@
 // - respond 回执:{accepted} 或 {accepted:false, reason:not-pending|bad-response}
 //   —— 第一个应答赢;迟到者 not-pending,畸形者 bad-response
 // - approval/resolved、question/resolved 帧负责清场;重连重放未决帧(同 rpcId)
+//   —— 但 resolved 只 broadcast 一次、绝不重放:断线窗口错过的 resolved
+//   帧没有补偿,靠「新代际清场 + 基线重放重建」对账(web Session.resync
+//   的 pending.clear 同款),not-pending 回执是第二道清场信号
 // - session/queue 是完整快照(整帧收敛,直接替换)
 import 'dart:async';
 
@@ -64,21 +67,22 @@ class PendingQuestion {
 }
 
 class InteractorStore {
-  InteractorStore({required this.api, required ConnectionController? connection}) : _connection = connection {
+  InteractorStore({required this.api, required ConnectionController? connection}) {
     _approvalsController = StreamController<List<PendingApproval>>.broadcast();
     _questionsController = StreamController<List<PendingQuestion>>.broadcast();
     _queueController = StreamController<Map<String, List<Map<String, dynamic>>>>.broadcast();
     if (connection != null) {
       _muxSub = connection.addressedMuxFrames.listen(_onAddressedFrame);
+      _genSub = connection.snapshots.listen(_onGeneration);
     }
   }
 
   final ApiClient api;
-  final ConnectionController? _connection;
   late final StreamController<List<PendingApproval>> _approvalsController;
   late final StreamController<List<PendingQuestion>> _questionsController;
   late final StreamController<Map<String, List<Map<String, dynamic>>>> _queueController;
   StreamSubscription<AddressedMuxFrame>? _muxSub;
+  StreamSubscription<ConnectionSnapshot>? _genSub;
 
   final Map<String, PendingApproval> _approvals = {};
   final Map<String, PendingQuestion> _questions = {};
@@ -93,12 +97,20 @@ class InteractorStore {
   Map<String, List<Map<String, dynamic>>> get currentQueues => Map.unmodifiable(_queues);
 
   /// 审批应答:rpcId 回显帧的;value 槽装 {sessionId, approvalId, outcome}。
-  Future<RespondReceipt> respondApproval(String rpcId, String sessionId, String approvalId, {required bool allow}) {
-    return _respond(rpcId, <String, dynamic>{
+  /// not-pending 回执 = host 侧已 resolved(另一端先答/turn 取消)——
+  /// resolved 帧只 broadcast 一次,若已错过(断线窗口),这是最后的权威
+  /// 清场信号,本地立即移除,卡片不再滞留。
+  Future<RespondReceipt> respondApproval(String rpcId, String sessionId, String approvalId, {required bool allow}) async {
+    final receipt = await _respond(rpcId, <String, dynamic>{
       'sessionId': sessionId,
       'approvalId': approvalId,
       'outcome': allow ? 'allowed-once' : 'rejected',
     });
+    if (receipt.late && _approvals.containsKey(rpcId)) {
+      _approvals.remove(rpcId);
+      _approvalsController.add(currentApprovals);
+    }
+    return receipt;
   }
 
   /// 队列项删除(按 MessageId 寻址;被 claim 的 splice 赢竞态,后来者
@@ -113,6 +125,19 @@ class InteractorStore {
         parse: SessionUpdateQueueValue.fromJson,
       );
 
+  /// 队列项插话提升(session.updateQueue kind:'steer';web queue.steer
+  /// 同款)。steer-unavailable / queue-item-not-found 是合法竞态结果
+  /// (轮次刚结束/项刚被 claim),调用方应静默收敛,不当错误处理。
+  Future<void> steerQueueItem(String sessionId, String itemId) => api.call(
+        RpcMethods.sessionUpdateQueue,
+        <String, dynamic>{
+          'sessionId': sessionId,
+          'itemId': itemId,
+          'action': <String, dynamic>{'kind': 'steer'},
+        },
+        parse: SessionUpdateQueueValue.fromJson,
+      );
+
   /// 取消当前 turn(保留 pending inbox;FIFO 认领由主机驱动,客户端永不提升)。
   Future<void> cancelSession(String sessionId) => api.call(
         RpcMethods.sessionCancel,
@@ -122,13 +147,19 @@ class InteractorStore {
 
   /// 问答应答:批次必须完整(每个 questionId 一条),label 精确匹配,
   /// multiSelect 才可多选 + custom;custom 空串拒。
-  Future<RespondReceipt> respondQuestions(String rpcId, String sessionId, List<Map<String, dynamic>> answers) {
-    return _respond(rpcId, <String, dynamic>{
+  /// not-pending 同 respondApproval:权威已 resolved,本地清场。
+  Future<RespondReceipt> respondQuestions(String rpcId, String sessionId, List<Map<String, dynamic>> answers) async {
+    final receipt = await _respond(rpcId, <String, dynamic>{
       'sessionId': sessionId,
       'answer': <String, dynamic>{
         'answers': answers,
       },
     });
+    if (receipt.late && _questions.containsKey(rpcId)) {
+      _questions.remove(rpcId);
+      _questionsController.add(currentQuestions);
+    }
+    return receipt;
   }
 
   Future<RespondReceipt> _respond(String rpcId, Map<String, dynamic> value) async {
@@ -210,8 +241,28 @@ class InteractorStore {
     }
   }
 
+  /// 新代际开始(connecting):旧代际已死、新 mux 尚未打开,基线重放帧
+  /// 必然还未流入 —— 此刻清场无竞态。resolved 帧 host 只 broadcast 一次、
+  /// 绝不重放(mux-open 只重放 still-pending 的 requested 帧);断线窗口
+  /// 错过的 resolved 没有任何补偿,不清场会让交互卡永久滞留。对齐 web
+  /// 官方 Session.resync 的语义:「Superseded, not settled: the baseline
+  /// replay re-sends still-pending requested frames verbatim (same rpcId)」。
+  /// 队列同清:session/queue 是整帧收敛快照,host 在 mux open 后重推;
+  /// 保留旧快照可能滞留幻影(web manager 的 re-baseline 同款取舍)。
+  void _onGeneration(ConnectionSnapshot snap) {
+    if (snap.phase != ConnectionPhase.connecting) return;
+    if (_approvals.isEmpty && _questions.isEmpty && _queues.isEmpty) return;
+    _approvals.clear();
+    _questions.clear();
+    _queues.clear();
+    _approvalsController.add(currentApprovals);
+    _questionsController.add(currentQuestions);
+    _queueController.add(currentQueues);
+  }
+
   Future<void> dispose() async {
     await _muxSub?.cancel();
+    await _genSub?.cancel();
     await _approvalsController.close();
     await _questionsController.close();
     await _queueController.close();

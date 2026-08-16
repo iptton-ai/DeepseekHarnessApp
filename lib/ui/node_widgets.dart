@@ -3,19 +3,22 @@
 // 移动纪律(硬性):触控行 ≥44dp、工具详情横向滚动 + 点击全屏 dialog、
 // 气泡全文不截断;hover 语义全部改为常显按钮/常显触发行。
 // 展示增强:
-// - 自动跟底:新节点到达时,若用户本来就停在列表底部则平滑跟随(翻历史不拽回)。
-// - 流式节点:assistant 直播气泡尾部呼吸光标;think 直播时自动展开、定稿收起。
+// - 自动跟底:新节点到达时,若用户本来就停在列表底部则平滑跟随;用户主动
+//   滚离底部即停跟随(不打扰翻历史),右下角常显「回到底部」按钮。
+// - 流式节点:assistant 直播气泡尾部呼吸光标;think 始终默认收起,直播中
+//   标题行显示思考最后一行:先打字效果,满行后窗口锚定行尾向左滑动
+//   (最右字符永远是最新字符)。
 // - 工具卡:状态左缘色条 + 运行中旋转指示 + 常用工具图标词表 + 复制按钮。
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/event_nodes.dart';
-import 'package:singleman/sessions/feedback_store.dart';
 import 'package:singleman/ui/attachment_views.dart';
-import 'package:singleman/ui/feedback_row.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 常显触控高度下限(移动可用性硬性要求)。
@@ -31,7 +34,7 @@ class ChatNodeList extends StatefulWidget {
     this.padding,
     this.sessionId,
     this.attachmentFetcher,
-    this.feedbackStore,
+    this.onFork,
   });
   final List<ChatNode> nodes;
 
@@ -39,8 +42,9 @@ class ChatNodeList extends StatefulWidget {
   final String? sessionId;
   final AttachmentFetchView? attachmentFetcher;
 
-  /// 消息反馈(W3-B):注入时助手消息下缘挂 FeedbackActions;缺席不渲染。
-  final FeedbackStoreView? feedbackStore;
+  /// 消息操作区「分叉」回调(对齐 web MessageIconActions 的 branch):
+  /// 参数 = 锚定消息 seq;缺席时分叉按钮不渲染(复制按钮始终可用)。
+  final void Function(int seq)? onFork;
   final EdgeInsetsGeometry? padding;
 
   @override
@@ -51,20 +55,63 @@ class _ChatNodeListState extends State<ChatNodeList> {
   final _controller = ScrollController();
   int _lastCount = 0;
   int _lastBottomSeq = 0;
+
+  /// 是否自动跟随底部。**只有真正贴底才保持 true**:
+  /// 用户做过任何离开底部的滚动(拖拽或 fling)即置 false,并且
+  /// **滚回最底端(≈0 误差)才恢复** —— 不再有「底部附近 120dp 就算
+  /// 跟随」的宽判(旧版用户短 fling 惯性停在底部附近 → 跟随悄悄恢复
+  /// → 下一个流式 delta 把用户拽回底部,表现为 fling 被「抢滚动」)。
   bool _follow = true;
+
+  /// 用户拖拽进行中(此间绝不程序性抢滚动)。
+  bool _userDrag = false;
+
+  /// 是否越过「回到底部」按钮的出现阈值:离底部超过**半屏**
+  /// (viewportDimension/2;用户诉求 —— 轻微上翻不弹按钮,翻远了才出现)。
+  /// 与 [_follow] 独立:_follow 管「贴底自动跟随」(epsilon 级严判),
+  /// 本阈值只管按钮可见性。
+  bool _pastThreshold = false;
+
+  /// 是否显示「回到底部」按钮:停跟随**且**已越过半屏阈值。
+  bool get _showJumpButton => !_follow && _pastThreshold;
+
+  /// 判定「真正贴底」的容差(px):浮点 + 内容增长时序上的极小空隙。
+  static const double _kAtBottomEpsilon = 0.5;
 
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      if (!_controller.hasClients) return;
-      final max = _controller.position.maxScrollExtent;
-      // 距底 < 120dp 视为「停在底部」,新内容可跟随;否则用户在翻历史,不打扰。
-      _follow = max - _controller.offset < 120;
-    });
+    _controller.addListener(_onScrollTick);
     _lastCount = widget.nodes.length;
     _lastBottomSeq = widget.nodes.isEmpty ? 0 : widget.nodes.last.seq;
     WidgetsBinding.instance.addPostFrameCallback((_) => _snapToEnd());
+  }
+
+  void _onScrollTick() {
+    if (!_controller.hasClients) return;
+    final pos = _controller.position;
+    final max = pos.maxScrollExtent;
+    // 滚回**真正最底端** → 恢复跟随并撤按钮。仅此一处恢复入口;
+    // 底部附近不算 —— 流式期间惯性停在阈值内也不许自动跟随复活。
+    if (max - pos.pixels <= _kAtBottomEpsilon) {
+      if (!_follow || _pastThreshold) {
+        _follow = true;
+        _pastThreshold = false;
+        _refreshJumpButton();
+      }
+    }
+    // 半屏阈值跨越:只在跨界时 setState(每 tick 重算但不重复刷新)。
+    final viewport = pos.viewportDimension;
+    final past =
+        viewport > 0 && (max - pos.pixels) > viewport / 2;
+    if (past != _pastThreshold) {
+      _pastThreshold = past;
+      _refreshJumpButton();
+    }
+  }
+
+  void _refreshJumpButton() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -72,22 +119,88 @@ class _ChatNodeListState extends State<ChatNodeList> {
     super.didUpdateWidget(oldWidget);
     if (widget.nodes.isEmpty) {
       _lastCount = 0;
+      _lastBottomSeq = 0;
+      if (!_follow || _pastThreshold) {
+        _follow = true;
+        _pastThreshold = false;
+        _refreshJumpButton();
+      }
       return;
     }
-    if (identical(widget.nodes, oldWidget.nodes)) return;
+    if (identical(widget.nodes, oldWidget.nodes) &&
+        widget.sessionId == oldWidget.sessionId) {
+      return;
+    }
+    // 会话切换:滚动上下文整体作废,回到贴底跟随态。
+    final sessionChanged = widget.sessionId != oldWidget.sessionId;
+    if (sessionChanged && (!_follow || _pastThreshold)) {
+      _follow = true;
+      _pastThreshold = false;
+      _refreshJumpButton();
+    }
     final grew = widget.nodes.length > _lastCount ||
         widget.nodes.last.seq != _lastBottomSeq;
     _lastCount = widget.nodes.length;
     _lastBottomSeq = widget.nodes.last.seq;
-    if (grew && _follow) {
+    if ((grew || sessionChanged) && _follow && !_userDrag) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _snapToEnd());
     }
   }
 
-  void _snapToEnd() {
+  /// 贴底收敛。ListView 惰性构建:一次 jumpTo 后新条目才物化,
+  /// maxScrollExtent 会继续长(一次跳不到真底部),需要逐帧追到收敛;
+  /// 有界(passes)防活内容下无限追。中止条件三选一:用户拖拽 /
+  /// 用户已滚离底部(跟随关闭——收敛循环绝不能把用户拽回来) /
+  /// pass 耗尽。
+  void _convergeToBottom(int passes) {
+    if (!mounted ||
+        !_controller.hasClients ||
+        passes <= 0 ||
+        _userDrag ||
+        !_follow) {
+      return;
+    }
+    final pos = _controller.position;
+    if (pos.maxScrollExtent - pos.pixels <= _kAtBottomEpsilon) return;
+    _controller.jumpTo(pos.maxScrollExtent);
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _convergeToBottom(passes - 1));
+  }
+
+  void _snapToEnd() => _convergeToBottom(48);
+
+  Future<void> _animateToBottom() async {
     if (!mounted || !_controller.hasClients) return;
-    final max = _controller.position.maxScrollExtent;
-    _controller.jumpTo(max);
+    _follow = true;
+    _pastThreshold = false;
+    _refreshJumpButton();
+    await _controller.animateTo(
+      _controller.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+    );
+    // 动画落点后惰性物化可能又长出新空间,再收敛几帧。
+    if (mounted) _convergeToBottom(12);
+  }
+
+  bool _onScrollNotification(ScrollNotification n) {
+    // 拖拽起止:拖拽期间不程序性抢滚动。
+    if (n is ScrollStartNotification && n.dragDetails != null) {
+      _userDrag = true;
+    } else if (n is ScrollEndNotification) {
+      _userDrag = false;
+    }
+    // 用户朝更早内容方向滚 → 立即停跟随并亮出「回到底部」。
+    final userUp =
+        (n is UserScrollNotification && n.direction == ScrollDirection.reverse) ||
+            (n is ScrollUpdateNotification &&
+                n.dragDetails != null &&
+                (n.scrollDelta ?? 0) < 0);
+    if (userUp && _follow) {
+      _follow = false;
+      _refreshJumpButton();
+    }
+    return false;
   }
 
   @override
@@ -99,17 +212,47 @@ class _ChatNodeListState extends State<ChatNodeList> {
   @override
   Widget build(BuildContext context) {
     if (widget.nodes.isEmpty) return const SizedBox.shrink();
-    return ListView.builder(
-      controller: _controller,
-      padding: widget.padding ?? const EdgeInsets.fromLTRB(12, 12, 12, 18),
-      itemCount: widget.nodes.length,
-      itemBuilder: (context, i) {
-        final node = widget.nodes[i];
-        return KeyedSubtree(
-          key: ValueKey('node-${node.seq}-${node.type}-${i == widget.nodes.length - 1 ? 'tail' : 'body'}'),
-          child: _nodeWidget(context, node),
-        );
-      },
+    return Stack(
+      children: [
+        NotificationListener<ScrollNotification>(
+          onNotification: _onScrollNotification,
+          child: ListView.builder(
+            controller: _controller,
+            padding: widget.padding ?? const EdgeInsets.fromLTRB(12, 12, 12, 18),
+            itemCount: widget.nodes.length,
+            itemBuilder: (context, i) {
+              final node = widget.nodes[i];
+              return KeyedSubtree(
+                key: ValueKey('node-${node.seq}-${node.type}-${i == widget.nodes.length - 1 ? 'tail' : 'body'}'),
+                child: _nodeWidget(context, node),
+              );
+            },
+          ),
+        ),
+        // 回到底部:仅在用户滚离底部(停跟随)时常显;点击平滑回底并恢复跟随。
+        Positioned(
+          right: 14,
+          bottom: 14,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 160),
+            switchInCurve: Curves.easeOut,
+            switchOutCurve: Curves.easeIn,
+            transitionBuilder: (child, anim) => FadeTransition(
+              opacity: anim,
+              child: ScaleTransition(scale: anim, child: child),
+            ),
+            child: _showJumpButton
+                ? FloatingActionButton(
+                    key: const ValueKey('scroll-to-bottom'),
+                    tooltip: '滚动到底部',
+                    onPressed: _animateToBottom,
+                    elevation: 3,
+                    child: const Icon(Icons.arrow_downward_rounded),
+                  )
+                : const SizedBox.shrink(key: ValueKey('scroll-to-bottom-hidden')),
+          ),
+        ),
+      ],
     );
   }
 
@@ -133,12 +276,15 @@ class _ChatNodeListState extends State<ChatNodeList> {
             fetcher: fetcher,
             streaming: node.streaming,
           ),
-          // W3-B:助手消息反馈(👍/👎/备注;messageId 用事件 seq 字符串)。
-          if (sid != null && widget.feedbackStore != null && !node.streaming)
-            FeedbackActions(
-              store: widget.feedbackStore!,
-              sessionId: sid,
-              messageId: node.seq.toString(),
+          // 消息操作区(对齐 web MessageIconActions):定稿后常显
+          // 复制 + 分叉。反馈(👍/👎/备注)已移除 —— web 侧该功能走
+          // 可选插件 slot(assistant-actions),本机 web 未装,客户端
+          // 不应单方面出现 web 没有的 UI。
+          if (!node.streaming)
+            _AssistantActions(
+              text: node.text,
+              seq: node.seq,
+              onFork: widget.onFork,
             ),
         ],
       ),
@@ -280,7 +426,7 @@ class _AssistantBubble extends StatelessWidget {
               Icon(Icons.auto_awesome_rounded, size: 16, color: colors.primary),
               const SizedBox(width: 6),
               Text(
-                'singleman',
+                'DshAPP',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
@@ -404,8 +550,76 @@ class _TypingDots extends StatelessWidget {
   }
 }
 
-/// think 折叠块:默认收起,整行 ≥44dp 可点,展开显示全文。
-/// streaming 时自动展开并标记「思考中」;定稿(或用户手动)恢复常规折叠态。
+/// 定稿助手消息的操作行(对齐 web MessageIconActions):复制(全文进
+/// 剪贴板,点击后图标短暂变 ✓ 反馈)+ 分叉(fork atSeq=消息 seq,
+/// 缺回调时不渲染分叉)。常显(移动纪律:hover-only 改常显);
+/// 触控目标 ≥44dp 由 IconButton visualDensity 补足。
+class _AssistantActions extends StatefulWidget {
+  const _AssistantActions({required this.text, required this.seq, this.onFork});
+
+  final String text;
+  final int seq;
+  final void Function(int seq)? onFork;
+
+  @override
+  State<_AssistantActions> createState() => _AssistantActionsState();
+}
+
+class _AssistantActionsState extends State<_AssistantActions> {
+  bool _copied = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    // 800ms 后图标复原(足够看到反馈,不停留成永久状态)。
+    Future<void>.delayed(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onFork = widget.onFork;
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: _copied ? '已复制' : '复制全文',
+            visualDensity: VisualDensity.compact,
+            onPressed: _copy,
+            icon: Icon(
+              _copied ? Icons.check : Icons.copy,
+              size: 16,
+              color: _copied
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.outline,
+            ),
+          ),
+          if (onFork != null)
+            IconButton(
+              tooltip: '从此处分叉新会话',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => onFork(widget.seq),
+              icon: Icon(
+                Icons.call_split,
+                size: 16,
+                color: theme.colorScheme.outline,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// think 折叠块:**始终默认收起**(直播中也不抢占滚动),整行 ≥44dp 可点,
+/// 展开显示全文。直播(streaming)时标题行显示思考正文的最后一行
+/// (过滤空行与首尾空白):未超宽 = 逐字追加的打字效果;超宽后窗口锚定
+/// 行尾向左滑动(最右字符永远是最新字符);定稿后恢复常规「思考过程」标题。
 class _ThinkBlock extends StatefulWidget {
   const _ThinkBlock({required this.text, this.streaming = false});
   final String text;
@@ -418,10 +632,36 @@ class _ThinkBlock extends StatefulWidget {
 class _ThinkBlockState extends State<_ThinkBlock> {
   bool _userExpanded = false;
 
+  /// 展开态展示上限(字符);超长思考全文走分块查看器。
+  static const int _kThinkCap = 6000;
+  bool get _truncated => widget.text.length > _kThinkCap;
+  String get _cappedText => _truncated
+      ? '${widget.text.substring(0, _kThinkCap)}\n…(共 ${widget.text.length} 字符,已截断)'
+      : widget.text;
+
+  /// 收起态标题行文本:直播中 = 正文最后一个非空行(跑马灯滚动);
+  /// 否则「思考过程」。只扫描末尾窗口:全文 split 是 O(n)/帧,
+  /// 长思考(几十 KB)在高频重建下是明确的卡顿源。
+  static const int _kHeadlineWindow = 800;
+  String get _headline {
+    if (!widget.streaming) return '思考过程';
+    final t = widget.text;
+    final window = t.length > _kHeadlineWindow
+        ? t.substring(t.length - _kHeadlineWindow)
+        : t;
+    final lines = window.split('\n');
+    for (var i = lines.length - 1; i >= 0; i--) {
+      final s = lines[i].trim();
+      if (s.isNotEmpty) return s;
+    }
+    return '思考中…';
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final expanded = _userExpanded || widget.streaming;
+    final expanded = _userExpanded;
+    final headline = _headline;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
@@ -453,18 +693,53 @@ class _ThinkBlockState extends State<_ThinkBlock> {
                       color: theme.colorScheme.tertiary,
                     ),
                     const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        widget.streaming ? '思考中…' : '思考过程',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                          color: widget.streaming
-                              ? theme.colorScheme.tertiary
-                              : theme.colorScheme.onSurfaceVariant,
+                    if (widget.streaming && !expanded)
+                      // 直播标记小点:与滚动末行并存,提示仍在思考。
+                      Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(right: 8),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.tertiary,
+                          shape: BoxShape.circle,
                         ),
                       ),
+                    Expanded(
+                      child: widget.streaming
+                          // 直播标题行:未超宽=打字效果;超宽=窗口锚定行尾
+                          // 向左滑(最右字符永远是最新字符)。
+                          ? RepaintBoundary(
+                              child: _TailScrollText(
+                                text: headline,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                  color: theme.colorScheme.tertiary,
+                                ),
+                              ),
+                            )
+                          : Text(
+                              headline,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
                     ),
+                    if (widget.streaming && !expanded) ...[
+                      Text(
+                        '思考中',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.tertiary
+                              .withValues(alpha: .9),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
                     Icon(
                       expanded ? Icons.expand_less : Icons.expand_more,
                       size: 18,
@@ -475,21 +750,179 @@ class _ThinkBlockState extends State<_ThinkBlock> {
               ),
             ),
           ),
-          if (expanded)
+          if (expanded) ...[
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-              child: SelectableText(
-                widget.text,
-                style: TextStyle(
-                  fontSize: 13,
-                  height: 1.45,
-                  color: theme.colorScheme.onSurfaceVariant,
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              // 流式期间用 Text:SelectableText 的选择手势/布局代价高,
+              // 250ms 一跳的全量重建下会拖垮滚动;定稿后恢复可选可复制。
+              child: widget.streaming
+                  ? Text(
+                      _cappedText,
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.45,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    )
+                  : SelectableText(
+                      _cappedText,
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.45,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+            ),
+            if (_truncated)
+              Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 10),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: () => showChunkedTextDialog(
+                      context,
+                      title: '思考全文',
+                      text: widget.text,
+                    ),
+                    icon: const Icon(Icons.fullscreen, size: 15),
+                    label: const Text('全屏查看完整思考',
+                        style: TextStyle(fontSize: 12)),
+                  ),
                 ),
               ),
-            ),
+          ],
         ],
       ),
     );
+  }
+}
+
+/// 尾随滚动标题行(打字 → 满行后向左滑的走马灯):
+/// 行内容未超宽时静止 —— 流式追加新字符即天然的「打字效果」;
+/// 一旦超出可视宽,窗口**始终锚定行尾** —— 最右字符永远是最新字符,
+/// 后续新字符到达时整行向左平滑滑出(指数趋近,远快近缓),
+/// 用户在任何时刻都看得到正在生成的字符(终端式跟随,不是从头到尾
+/// 的循环滚动 —— 那种方式下新字符要等整轮滚完才可见)。
+/// 行切换(新行开头不同)时立即回到行首,重新开始打字。
+/// 动画只驱动 Transform(Ticker 每帧小步更新 + RepaintBoundary 隔离),
+/// 作用域仅本组件,与 15Hz 节流的文本更新互不放大。
+class _TailScrollText extends StatefulWidget {
+  const _TailScrollText({required this.text, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  State<_TailScrollText> createState() => _TailScrollTextState();
+}
+
+class _TailScrollTextState extends State<_TailScrollText>
+    with SingleTickerProviderStateMixin {
+  // initState 立即创建(late final 惰性求值会让「从未滑过」的实例在
+  // dispose 时才首次初始化,于已反激活 element 上查 TickerMode 而炸)。
+  late final Ticker _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick);
+  }
+
+  double _dx = 0; // 当前水平位移(≤0;0 = 显示行首)。
+  double _targetDx = 0;
+  Duration _lastElapsed = Duration.zero;
+  double _viewportWidth = 0;
+  double _textWidth = -1;
+  String? _measuredText;
+  TextScaler? _measuredScaler;
+
+  /// 指数趋近速率(1/s):每帧靠近剩余距离的固定比例 → 远时快、近时缓
+  /// 的自然滑动;12/s 约百毫秒级到位,与流式追加节奏匹配不堆积。
+  static const double _kApproach = 12;
+  static const double _kSnap = 0.25; // 收敛阈值(px):小于即贴齐停表。
+
+  void _onTick(Duration elapsed) {
+    final dt =
+        ((elapsed - _lastElapsed).inMicroseconds / 1e6).clamp(0.001, 0.05);
+    _lastElapsed = elapsed;
+    final gap = _targetDx - _dx;
+    if (gap.abs() <= _kSnap) {
+      _dx = _targetDx;
+      _ticker.stop();
+    } else {
+      _dx += gap * (dt * _kApproach).clamp(0.0, 1.0);
+    }
+    setState(() {});
+  }
+
+  void _measure(TextScaler scaler) {
+    if (_measuredText == widget.text && _measuredScaler == scaler) return;
+    _measuredText = widget.text;
+    _measuredScaler = scaler;
+    final painter = TextPainter(
+      text: TextSpan(text: widget.text, style: widget.style),
+      textScaler: scaler,
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    _textWidth = painter.width;
+    painter.dispose();
+  }
+
+  /// 重新计算锚点 = -(文本宽-视口宽)(下限 0);距离大则启动滑动。
+  void _retarget() {
+    final overflow = _textWidth - _viewportWidth;
+    _targetDx = overflow > 0 ? -overflow : 0;
+    if ((_targetDx - _dx).abs() > _kSnap) {
+      if (!_ticker.isActive) {
+        _lastElapsed = Duration.zero;
+        _ticker.start();
+      }
+    } else {
+      _dx = _targetDx;
+      _ticker.stop();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_TailScrollText old) {
+    super.didUpdateWidget(old);
+    _measure(_measuredScaler ?? TextScaler.noScaling);
+    final grew = widget.text.startsWith(old.text);
+    _retarget();
+    if (!grew) {
+      // 新行(开头不同):立刻静止在新锚点(通常行首 0)→ 重新「打字」。
+      _dx = _targetDx;
+      _ticker.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(builder: (context, constraints) {
+      _viewportWidth = constraints.maxWidth;
+      _measure(scaler);
+      _retarget(); // 幂等:文本/视口/缩放任一变化后重新锚定。
+      return ClipRect(
+        child: Transform.translate(
+          offset: Offset(_dx, 0),
+          child: Text(
+            widget.text,
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.visible,
+            style: widget.style,
+          ),
+        ),
+      );
+    });
   }
 }
 
@@ -514,6 +947,7 @@ class _ToolCardState extends State<_ToolCard> {
     final color = _statusColor(context, node.status);
     final running = node.status == ToolStatus.running;
     return Container(
+      key: ValueKey('tool-card-${node.seq}'),
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerLow,
@@ -522,13 +956,20 @@ class _ToolCardState extends State<_ToolCard> {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        // IntrinsicHeight:左缘色条 stretch 需要有界高度(列表纵向无界)。
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-            Container(width: 3.5, color: color.withValues(alpha: .85)),
-            Expanded(
+        // 左缘色条改 Stack 覆盖:IntrinsicHeight 的高度取自 intrinsic 计算,
+        // 而横向滚动的等宽文本在 intrinsic 阶段按卡宽折行、实际布局却横向
+        // 延展不折行 —— 两套高度不一致,展开态就出现大半空白。
+        child: Stack(
+          children: [
+            PositionedDirectional(
+              start: 0,
+              top: 0,
+              bottom: 0,
+              width: 3.5,
+              child: Container(color: color.withValues(alpha: .85)),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(left: 3.5),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -603,7 +1044,6 @@ class _ToolCardState extends State<_ToolCard> {
               ),
             ),
           ],
-          ),
         ),
       ),
     );
@@ -699,43 +1139,8 @@ class _ToolDetail extends StatelessWidget {
       );
 
   void _openFullscreen(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => Dialog.fullscreen(
-        child: Scaffold(
-          appBar: AppBar(
-            title: Text(node.toolName),
-            actions: [
-              IconButton(
-                tooltip: '复制全部',
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: _fullscreenText()));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      duration: Duration(milliseconds: 1200),
-                      content: Text('已复制到剪贴板'),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.copy),
-              ),
-              IconButton(
-                tooltip: '关闭',
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close),
-              ),
-            ],
-          ),
-          body: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: SelectableText(
-              _fullscreenText(),
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            ),
-          ),
-        ),
-      ),
-    );
+    // 分块虚拟化:巨型输出(百 KB 级)单个 SelectableText 会卡布局。
+    showChunkedTextDialog(context, title: node.toolName, text: _fullscreenText());
   }
 
   String _fullscreenText() {
@@ -759,12 +1164,15 @@ class _ToolDetail extends StatelessWidget {
 }
 
 /// 等宽 + 横向滚动块(宽内容不挤爆行)。
+/// 展示截断:超过 [_kInlineCap] 字符只渲染首段(巨型工具输出的单个
+/// SelectableText 布局会卡 UI);完整内容走全屏分块查看器。
 class _MonoScroll extends StatelessWidget {
   const _MonoScroll({required this.text});
   final String text;
 
   @override
   Widget build(BuildContext context) {
+    final shown = _capForDisplay(text);
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 4),
@@ -776,12 +1184,101 @@ class _MonoScroll extends StatelessWidget {
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: SelectableText(
-          text,
+          shown,
           style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
         ),
       ),
     );
   }
+}
+
+/// 行内展示截断阈值(字符)。工具输出/原始 JSON 常见数十 KB,全量塞进
+/// 单个 SelectableText 会同步布局卡帧;行内只给首段,全文走分块查看器。
+const int _kInlineCap = 4000;
+
+String _capForDisplay(String text) {
+  if (text.length <= _kInlineCap) return text;
+  return '${text.substring(0, _kInlineCap)}\n…(共 ${text.length} 字符,已截断 —— 「全屏查看」看完整内容)';
+}
+
+/// 分块文本查看器:按 [_kChunkChars] 切片进 ListView.builder,只构建可视块;
+/// 巨型文本(百 KB 级工具输出/推理全文)也能流畅滚动。选择以块为单位。
+class ChunkedTextViewer extends StatelessWidget {
+  const ChunkedTextViewer({
+    super.key,
+    required this.text,
+    this.mono = true,
+    this.fontSize = 13,
+  });
+  final String text;
+  final bool mono;
+  final double fontSize;
+
+  /// 单块字符数(块内单个 SelectableText,块间虚拟化)。
+  static const int _kChunkChars = 6000;
+
+  @override
+  Widget build(BuildContext context) {
+    final chunks = <String>[];
+    for (var i = 0; i < text.length; i += _kChunkChars) {
+      chunks.add(text.substring(
+        i,
+        (i + _kChunkChars) < text.length ? i + _kChunkChars : text.length,
+      ));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: chunks.length,
+      itemBuilder: (context, i) => SelectableText(
+        chunks[i],
+        style: TextStyle(
+          fontFamily: mono ? 'monospace' : null,
+          fontSize: fontSize,
+          height: 1.4,
+        ),
+      ),
+    );
+  }
+}
+
+/// 打开全屏分块查看器(工具详情/思考全文共用)。
+void showChunkedTextDialog(
+  BuildContext context, {
+  required String title,
+  required String text,
+  String? copyLabel,
+}) {
+  showDialog<void>(
+    context: context,
+    builder: (context) => Dialog.fullscreen(
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(title, overflow: TextOverflow.ellipsis),
+          actions: [
+            IconButton(
+              tooltip: '复制全部',
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: text));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    duration: Duration(milliseconds: 1200),
+                    content: Text('已复制到剪贴板'),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy),
+            ),
+            IconButton(
+              tooltip: '关闭',
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+          ],
+        ),
+        body: ChunkedTextViewer(text: text),
+      ),
+    ),
+  );
 }
 
 /// 状态徽标:色点 + 状态词(运行中/成功/失败/中断)。
@@ -844,7 +1341,7 @@ String _toolLabel(String toolName) {
     'edit' => '编辑文件',
     'glob' => '查找文件',
     'grep' => '搜索内容',
-    'todo_write' || 'todo' => '更新计划',
+    'todo_write' || 'todo' => '更新任务清单',
     'web_search' || 'websearch' => '联网搜索',
     'run_code' => '运行代码',
     'ask_user_question' || 'ask' => '向你提问',
@@ -1142,6 +1639,8 @@ IconData _noticeIcon(String icon) => switch (icon) {
   'schedule' => Icons.schedule_outlined,
   'workflow' => Icons.account_tree_outlined,
   'agents' => Icons.smart_toy_outlined,
+  'stop' => Icons.stop_circle_outlined,
+  'warning' => Icons.warning_amber_outlined,
   _ => Icons.info_outline,
 };
 

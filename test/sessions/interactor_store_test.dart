@@ -242,4 +242,78 @@ void main() {
     // 第二帧整帧替换为空(收敛语义:不是追加)。
     expect(states.last['session-s1'] ?? const [], isEmpty);
   });
+
+  // ---- 断线窗口对账(用户实报:web 侧回答后,手机侧交互卡不消失)----
+  //
+  // host 语义(api-proxy.ts):resolved 帧 broadcast 一次、绝不重放;
+  // mux open 只重放 still-pending 的 requested 帧(同 rpcId)。断线期间
+  // 错过的 resolved 没有补偿,客户端必须在新代际清场 + 靠基线重放重建
+  // (web 官方 Session.resync 的 pending.clear 同款)。
+
+  test('reconnect window: resolved missed during disconnect does not linger', () async {
+    host.pushApprovalFrame(rpcId: 'appr-disc', sessionId: 'session-s1', approvalId: 'approval-disc');
+    await store.approvals.firstWhere((l) => l.isNotEmpty).timeout(const Duration(seconds: 3));
+    expect(store.currentApprovals, hasLength(1));
+
+    // 订阅先于拔线:清场事件(connecting)必定可见。
+    final cleared = store.approvals.firstWhere((l) => l.isEmpty).timeout(const Duration(seconds: 3));
+    host.unplugMux();
+    // 断线窗口内 web 侧回答:host settled(重放集移除),resolved 帧
+    // broadcast 时 muxSockets 为空 —— 手机收不到,重连后也不会重放。
+    host.resolveApprovalExternally(rpcId: 'appr-disc', sessionId: 'session-s1', approvalId: 'approval-disc');
+
+    await controller.snapshots
+        .firstWhere((s) => s.phase == ConnectionPhase.ready && s.generation >= 2)
+        .timeout(const Duration(seconds: 5));
+    await cleared; // 旧代码此处永远等不到:卡片残留,永不消失
+    expect(store.currentApprovals, isEmpty);
+  });
+
+  test('reconnect replay: still-pending requested frame re-arrives with same rpcId', () async {
+    host.pushApprovalFrame(rpcId: 'appr-rep', sessionId: 'session-s1', approvalId: 'approval-rep');
+    await store.approvals.firstWhere((l) => l.isNotEmpty).timeout(const Duration(seconds: 3));
+
+    final seenAgain = store.approvals.firstWhere((l) => l.isNotEmpty).timeout(const Duration(seconds: 5));
+    host.unplugMux();
+    // 未被任何端回答:mux open 时 fake host 原样重放(同 rpcId)。
+    await controller.snapshots
+        .firstWhere((s) => s.phase == ConnectionPhase.ready && s.generation >= 2)
+        .timeout(const Duration(seconds: 5));
+    final list = await seenAgain;
+    expect(list, hasLength(1));
+    expect(list.first.rpcId, 'appr-rep');
+    expect(list.first.approvalId, 'approval-rep');
+  });
+
+  test('late receipt (not-pending) clears the stale approval card locally', () async {
+    host.pushApprovalFrame(rpcId: 'appr-late', sessionId: 'session-s1', approvalId: 'approval-late');
+    await store.approvals.firstWhere((l) => l.isNotEmpty).timeout(const Duration(seconds: 3));
+    // rejectNextRespond:回执 not-pending 且不发 resolved 帧 ——
+    // 分离「回执清场」与「resolved 帧清场」两条路径。
+    host.rejectNextRespond = true;
+    final receipt = await store.respondApproval('appr-late', 'session-s1', 'approval-late', allow: true);
+    expect(receipt.late, isTrue);
+    expect(store.currentApprovals, isEmpty);
+  });
+
+  test('late receipt clears the stale question form locally', () async {
+    host.pushQuestionFrame(rpcId: 'q-late', sessionId: 'session-s1', questions: [
+      {
+        'id': 'q1',
+        'question': '继续吗?',
+        'options': [
+          {'label': '继续'},
+          {'label': '停止'},
+        ],
+        'multiSelect': false,
+      }
+    ]);
+    await store.questions.firstWhere((l) => l.isNotEmpty).timeout(const Duration(seconds: 3));
+    host.rejectNextRespond = true;
+    final receipt = await store.respondQuestions('q-late', 'session-s1', [
+      {'id': 'q1', 'selected': ['继续']},
+    ]);
+    expect(receipt.late, isTrue);
+    expect(store.currentQuestions, isEmpty);
+  });
 }

@@ -80,10 +80,94 @@ class PairingFailure implements Exception {
   String toString() => 'PairingFailure($message)';
 }
 
+/// 扫码邀请(M6.2):Mac 终端二维码 → 系统相机落地页「复制」→ 此处粘贴。
+/// 内容是网关 /pair 落地页 URL(fragment 携带码),或裸 10 位码(手抄兜底)。
+class PairInvite {
+  const PairInvite({
+    required this.baseUri,
+    required this.code,
+    this.hostCode,
+    this.label = '',
+  });
+
+  /// 网关地址(落地页 URL 去掉 /pair 路径与 fragment)。
+  final Uri baseUri;
+
+  /// 10 位配对码(已归一化大写)。
+  final String code;
+
+  /// 锚定主机码(6 位;二维码携带,offers 里自动高亮匹配项)。
+  final String? hostCode;
+
+  /// 来源机器名(仅展示)。
+  final String label;
+
+  String get displayCode => '${code.substring(0, 5)}-${code.substring(5)}';
+}
+
+const _kInviteAlphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+String _normalizeCode(String raw) =>
+    raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+
+bool _isValidInviteCode(String code) => code.length == 10 &&
+    code.runes
+        .every((r) => _kInviteAlphabet.contains(String.fromCharCode(r)));
+
+/// 解析剪贴板/手输的邀请内容:
+/// - `https://host/pair#c=XXXXX&h=YYYYYY&l=label`(落地页「复制」产物)
+/// - `XXXXX-XXXXX` / `XXXXXXXXXX`(裸码;此时 baseUri 用 [fallbackBase])
+///
+/// 无法解析返回 null(UI 提示格式不对)。
+PairInvite? parsePairInvite(String input, {Uri? fallbackBase}) {
+  final text = input.trim();
+  if (text.isEmpty) return null;
+  if (text.contains('://')) {
+    final uri = Uri.tryParse(text);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) return null;
+    final frag = uri.fragment;
+    final query = Uri.splitQueryString(frag);
+    var code = _normalizeCode(query['c'] ?? query['code'] ?? '');
+    final host = _normalizeCode(query['h'] ?? query['host'] ?? '');
+    // 兼容:fragment 本身就是裸码(无键值对)。
+    if (code.isEmpty && frag.isNotEmpty && !frag.contains('=')) {
+      code = _normalizeCode(frag);
+    }
+    if (!_isValidInviteCode(code)) return null;
+    // 网关地址 = scheme://host[:port]。Uri.replace 对 fragment 的 null 语义是
+    // 「保持不变」、空串又留 ?# 尾巴 —— 组件重建才是干净删法。
+    final base = Uri(
+      scheme: uri.scheme,
+      userInfo: uri.userInfo.isEmpty ? null : uri.userInfo,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+    );
+    final rawLabel = query['l'] ?? '';
+    // 清洗但保留中文机器名(插件侧已限长;这里只剥会破坏展示的字符)。
+    final safeLabel = rawLabel
+        .replaceAll(RegExp(r'[^\p{L}\p{N} _.\-]', unicode: true), '')
+        .trim();
+    return PairInvite(
+      baseUri: base,
+      code: code,
+      hostCode: host.length >= 6 ? host.substring(0, 6) : null,
+      label: safeLabel.substring(0, safeLabel.length.clamp(0, 32)),
+    );
+  }
+  // 裸码:必须带兜底地址。
+  final code = _normalizeCode(text);
+  if (!_isValidInviteCode(code)) return null;
+  final base = fallbackBase;
+  if (base == null) return null;
+  return PairInvite(baseUri: base, code: code);
+}
+
 /// 配对客户端接口(UI 依赖;测试用假件替换)。
 abstract class RemotePairing {
-  /// 生成并发起配对;409(码被占)自动换码重试。返回待展示的会话。
-  Future<PairingSession> pairStart(Uri baseUri, {String device = 'singleman'});
+  /// 生成并发起配对;409(码被占)自动换码重试。
+  /// [code] 提供时使用扫码邀请的固定码(不换码 —— 邀请码锚定了 Mac 侧)。
+  Future<PairingSession> pairStart(Uri baseUri,
+      {String device = 'dshapp', String? code});
 
   /// 轮询当前状态与 offers 列表。
   Future<PairPollResult> pairPoll(PairingSession session);
@@ -134,21 +218,27 @@ mixin PairingClientMixin implements RemotePairing {
   }
 
   @override
-  Future<PairingSession> pairStart(Uri baseUri, {String device = 'singleman'}) async {
+  Future<PairingSession> pairStart(Uri baseUri,
+      {String device = 'dshapp', String? code}) async {
     Object? lastError;
+    // 外部邀请码归一化(去分隔符大写,与网关规则一致);自生成码本就纯净。
+    final normalized = code == null
+        ? null
+        : code.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
     // 409(码被存活 pending 占用)自动换码,最多 3 次。
+    // 邀请码不换码 —— 换了就与 Mac 侧锚定的码对不上。
     for (var attempt = 0; attempt < 3; attempt++) {
-      final code = generatePairCode();
+      final effective = normalized ?? generatePairCode();
       final secret = generatePairSecret();
       try {
         final resp = await _post(
           baseUri.replace(path: '/pair/start'),
-          {'code': code, 'secret': secret, 'device': device},
+          {'code': effective, 'secret': secret, 'device': device},
         );
         return PairingSession(
           baseUri: baseUri,
           pairingId: resp['pairing_id'] as String,
-          code: code,
+          code: effective,
           secret: secret,
           expiresAt: DateTime.fromMillisecondsSinceEpoch(
             ((resp['expires_at'] as int? ?? 0) * 1000),
@@ -214,6 +304,13 @@ mixin PairingClientMixin implements RemotePairing {
     if (token is! String || token.isEmpty) {
       throw const PairingFailure('网关响应缺少令牌');
     }
-    return RemoteLoginSuccess(baseUri: session.baseUri, token: token);
+    // 来源机器名回显(网关从 claim 的 host_label 快照;设置页「已连接 xxx」的
+    // 种子 —— 运行时以 /pair/api/host 的当前值为准,这里只做首显)。
+    final hostLabel = resp['host_label'];
+    return RemoteLoginSuccess(
+      baseUri: session.baseUri,
+      token: token,
+      hostLabel: hostLabel is String ? hostLabel : '',
+    );
   }
 }

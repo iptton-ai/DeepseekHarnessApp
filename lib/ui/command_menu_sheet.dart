@@ -5,7 +5,7 @@
 // - 命令组:/name + description + input.hint;skill 组:现有 skill 菜单格式
 //   (图标 auto_awesome/lock_outline + '/name' + description)
 // - 行高 ≥48dp(硬性 ≥44);宽内容单行截断;hover 类交互在移动端降级为常显
-// - 点击 = onPick('/name'),由集成方决定派发(命令 → execute,
+// - 点击 = onPick(CommandMenuItem),由集成方决定派发(命令 → execute,
 //   skill → prompt 文本,DSH-PROTOCOL §5)
 // - fuzzy:filterMenu(前缀优先 + 子序列,大小写不敏感),简化版
 // - 空目录/加载失败:内联提示 + 重试(搜索词保留)
@@ -15,13 +15,15 @@ import 'package:singleman/sessions/command_store.dart';
 
 /// 打开斜杠命令菜单(底部 sheet)。
 ///
-/// [onPick] 收到点击项的派发行文本('/name');集成方自行决定派发:
-/// 命令走 [CommandStoreView.execute],skill 走 prompt 文本。
+/// [onPick] 收到点击项([CommandMenuItem],含 command/skill 类型);
+/// 集成方自行决定派发:命令走 [CommandStoreView.execute],
+/// skill 走 prompt 文本(session.prompt,dsh-tool-skill 在 pre-step 识别
+/// '/name' token,DSH-PROTOCOL §5)。
 Future<void> showCommandMenu(
   BuildContext context, {
   required String sessionId,
   required CommandStoreView store,
-  required void Function(String line) onPick,
+  required void Function(CommandMenuItem item) onPick,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -44,7 +46,7 @@ class _CommandMenuSheet extends StatefulWidget {
 
   final String sessionId;
   final CommandStoreView store;
-  final void Function(String line) onPick;
+  final void Function(CommandMenuItem item) onPick;
 
   @override
   State<_CommandMenuSheet> createState() => _CommandMenuSheetState();
@@ -92,7 +94,7 @@ class _CommandMenuSheetState extends State<_CommandMenuSheet> {
 
   void _pick(CommandMenuItem item) {
     Navigator.pop(context);
-    widget.onPick(item.slash);
+    widget.onPick(item);
   }
 
   @override
@@ -184,38 +186,44 @@ class _CommandMenuSheetState extends State<_CommandMenuSheet> {
     final filteredSkills = filterMenu(menu.skills, _query);
     final hasAny = filteredCommands.isNotEmpty || filteredSkills.isNotEmpty;
 
-    return ListView(
-      shrinkWrap: true,
+    // 扁平描述符 + ListView.builder 虚拟化:插件清单可达百级,一次性
+    // children(shrinkWrap 全量测高)会卡滚动;widget 在 itemBuilder 懒构建。
+    final entries = <_MenuEntry>[
+      // 命令组错误位(agent-busy/失败)→ 内联提示 + 重试,菜单降级 skill-only。
+      if (menu.degraded) const _MenuEntry.degraded(),
+      if (filteredCommands.isNotEmpty) const _MenuEntry.header('命令'),
+      for (final item in filteredCommands) _MenuEntry.item(item),
+      if (filteredSkills.isNotEmpty) const _MenuEntry.header('技能'),
+      for (final item in filteredSkills) _MenuEntry.item(item),
+      if (!hasAny) const _MenuEntry.empty(),
+    ];
+    return ListView.builder(
       padding: const EdgeInsets.only(bottom: 12),
-      children: [
-        // 命令组错误位(agent-busy/失败)→ 内联提示 + 重试,菜单降级 skill-only。
-        if (menu.degraded)
-          _DegradedBanner(
-            errorCode: menu.errorCode,
-            errorMessage: menu.errorMessage,
-            onRetry: () => _load(force: true),
-          ),
-        if (filteredCommands.isNotEmpty) ...[
-          const _GroupHeader(key: ValueKey('command-group-commands'), title: '命令'),
-          for (final item in filteredCommands) _itemRow(item),
-        ],
-        if (filteredSkills.isNotEmpty) ...[
-          const _GroupHeader(key: ValueKey('command-group-skills'), title: '技能'),
-          for (final item in filteredSkills) _itemRow(item),
-        ],
-        if (!hasAny)
-          Padding(
-            key: const ValueKey('command-menu-empty'),
-            padding: const EdgeInsets.all(24),
-            child: Center(
-              child: Text(
-                _query.isEmpty ? '没有可用命令或技能' : '没有匹配项',
-                style: TextStyle(
-                    fontSize: 13, color: Theme.of(context).disabledColor),
+      itemCount: entries.length,
+      itemBuilder: (context, i) {
+        final e = entries[i];
+        return switch (e.kind) {
+          _MenuEntryKind.degraded => _DegradedBanner(
+              errorCode: menu.errorCode,
+              errorMessage: menu.errorMessage,
+              onRetry: () => _load(force: true),
+            ),
+          _MenuEntryKind.header => _GroupHeader(
+              key: ValueKey('command-group-${e.title}'), title: e.title!),
+          _MenuEntryKind.item => _itemRow(e.item!),
+          _MenuEntryKind.empty => Padding(
+              key: const ValueKey('command-menu-empty'),
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: Text(
+                  _query.isEmpty ? '没有可用命令或技能' : '没有匹配项',
+                  style: TextStyle(
+                      fontSize: 13, color: Theme.of(context).disabledColor),
+                ),
               ),
             ),
-          ),
-      ],
+        };
+      },
     );
   }
 
@@ -280,6 +288,29 @@ class _CommandMenuSheetState extends State<_CommandMenuSheet> {
     }
     return parts.join(' · ');
   }
+}
+
+/// 菜单扁平条目描述符(widget 构建推迟到 itemBuilder,列表虚拟化)。
+enum _MenuEntryKind { degraded, header, item, empty }
+
+class _MenuEntry {
+  const _MenuEntry.degraded()
+      : kind = _MenuEntryKind.degraded,
+        title = null,
+        item = null;
+  const _MenuEntry.header(this.title)
+      : kind = _MenuEntryKind.header,
+        item = null;
+  const _MenuEntry.item(this.item)
+      : kind = _MenuEntryKind.item,
+        title = null;
+  const _MenuEntry.empty()
+      : kind = _MenuEntryKind.empty,
+        title = null,
+        item = null;
+  final _MenuEntryKind kind;
+  final String? title;
+  final CommandMenuItem? item;
 }
 
 class _GroupHeader extends StatelessWidget {

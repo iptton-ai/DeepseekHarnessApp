@@ -114,17 +114,12 @@ void main() {
 
     test('mobileFirst: 已存凭证不受影响(静默连/loopback 语义不变)', () async {
       final remote = MemoryCredentialStore()
-        .._saveSync(StoredCredentials(
-          baseUri: Uri.parse('https://dsh.example.com'),
-          token: 'tok',
-        ));
+        ..seedHost(_host(Uri.parse('https://dsh.example.com'), token: 'tok'));
       final planRemote = await planFromCredentials(remote, mobileFirst: true);
       expect(planRemote.needsLogin, isFalse);
 
       final loop = MemoryCredentialStore()
-        .._saveSync(StoredCredentials(
-          baseUri: Uri.parse('http://127.0.0.1:3080'),
-        ));
+        ..seedHost(_host(Uri.parse('http://127.0.0.1:3080')));
       final planLoop = await planFromCredentials(loop, mobileFirst: true);
       expect(planLoop.needsLogin, isFalse);
       expect(planLoop.baseUri, Uri.parse('http://127.0.0.1:3080'));
@@ -133,10 +128,7 @@ void main() {
     test('loopback stored (even with token) → no login, token dropped',
         () async {
       final store = MemoryCredentialStore()
-        .._saveSync(StoredCredentials(
-          baseUri: Uri.parse('http://localhost:3080'),
-          token: 'stale',
-        ));
+        ..seedHost(_host(Uri.parse('http://localhost:3080'), token: 'stale'));
       final plan = await planFromCredentials(store);
       expect(plan.needsLogin, isFalse);
       expect(plan.tokenProvider.hasToken, isFalse,
@@ -145,9 +137,7 @@ void main() {
 
     test('remote without token → needs login', () async {
       final store = MemoryCredentialStore()
-        .._saveSync(StoredCredentials(
-          baseUri: Uri.parse('https://dsh.example.com'),
-        ));
+        ..seedHost(_host(Uri.parse('https://dsh.example.com')));
       final plan = await planFromCredentials(store);
       expect(plan.needsLogin, isTrue);
       expect(plan.baseUri, Uri.parse('https://dsh.example.com'));
@@ -155,18 +145,39 @@ void main() {
 
     test('remote with token → silent connect', () async {
       final store = MemoryCredentialStore()
-        .._saveSync(StoredCredentials(
-          baseUri: Uri.parse('https://dsh.example.com'),
-          token: 'tok',
-        ));
+        ..seedHost(_host(Uri.parse('https://dsh.example.com'), token: 'tok'));
       final plan = await planFromCredentials(store);
       expect(plan.needsLogin, isFalse);
       expect(plan.tokenProvider.hasToken, isTrue);
     });
+
+    test('planForBook 多主机簿:活动指针决定启动目标,seedMachine 随活动条目',
+        () async {
+      final h1 = _host(Uri.parse('https://a.example.com'),
+          token: 't1', hostLabel: 'MacA');
+      final h2 = _host(Uri.parse('https://b.example.com'),
+          token: 't2', hostLabel: 'MacB');
+      final planA = planForBook(HostBook(hosts: [h1, h2], activeId: h1.id));
+      expect(planA.baseUri, h1.baseUri);
+      expect(planA.seedMachine, 'MacA');
+
+      final planB = planForBook(HostBook(hosts: [h1, h2], activeId: h2.id));
+      expect(planB.baseUri, h2.baseUri);
+      expect(planB.tokenProvider.hasToken, isTrue);
+    });
   });
 }
 
-/// 测试便利:同步塞入内存凭证(store.save 是异步但内存实现即时生效)。
+StoredCredentials _host(Uri base, {String? token, String hostLabel = ''}) =>
+    StoredCredentials(
+      id: hostIdForBase(base),
+      baseUri: base,
+      token: token,
+      hostLabel: hostLabel,
+    );
+
+/// 测试便利:同步播种内存主机簿(单条,活动)。
 extension on MemoryCredentialStore {
-  void _saveSync(StoredCredentials c) => save(c);
+  void seedHost(StoredCredentials c) =>
+      seed(HostBook(hosts: [c], activeId: c.id));
 }

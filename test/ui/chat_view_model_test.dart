@@ -28,13 +28,24 @@ class _FakeView implements SessionStoreView {
       logs.putIfAbsent(sessionId, () => SessionLog(sessionId));
 
   int historyLoads = 0;
+
+  /// >0 时接下来 N 次装载抛错(测错误呈现与手动重试)。
+  int historyFailures = 0;
   @override
   Future<void> loadHistory(String sessionId) async {
     historyLoads += 1;
+    if (historyFailures > 0) {
+      historyFailures -= 1;
+      throw 'ApiTimeout(session.history after 30000ms)';
+    }
   }
 
   @override
   Future<void> loadOlder(String sessionId) async {}
+
+  @override
+  Future<String> fork(String sessionId, {int? atSeq}) async => 'forked';
+
 
   void emit() {
     current = List.of(current);
@@ -67,7 +78,7 @@ void main() {
   test('select() triggers loadHistory and renders after events arrive', () async {
     final view = _FakeView();
     view.current = [_summary('s1')];
-    final log = view.logFor('s1');
+    view.logFor('s1');
     final vm = ChatViewModel(store: view, connection: null);
     view.emit();
     await Future<void>.delayed(Duration.zero);
@@ -108,6 +119,37 @@ void main() {
     final users = vm.nodes.whereType<ChatNodeUser>().toList();
     expect(users, hasLength(1));
     expect(users.single.seq, 1);
+    vm.dispose();
+  });
+
+  test('历史加载失败落 lastError;retryHistory 清错重载,成功后横幅可退场', () async {
+    final view = _FakeView();
+    view.current = [_summary('s1')];
+    view.logFor('s1');
+    final vm = ChatViewModel(store: view, connection: null);
+    view.emit();
+    await Future<void>.delayed(Duration.zero);
+
+    view.historyFailures = 1;
+    vm.select('s2');
+    await Future<void>.delayed(Duration.zero);
+    expect(vm.lastError, isNotNull);
+    expect(vm.lastError, contains('历史消息加载失败'));
+    expect(view.historyLoads, 2);
+
+    // 手动重试:错误先清,装载成功后 lastError 保持为 null(横幅退场)。
+    await vm.retryHistory();
+    expect(view.historyLoads, 3);
+    expect(vm.lastError, isNull);
+
+    // 切换会话也清旧错。
+    view.historyFailures = 1;
+    vm.select('s1');
+    await Future<void>.delayed(Duration.zero);
+    expect(vm.lastError, isNotNull);
+    vm.select('s2');
+    await Future<void>.delayed(Duration.zero);
+    expect(vm.lastError, isNull);
     vm.dispose();
   });
 
@@ -159,6 +201,60 @@ void main() {
     vm.dispose();
   });
 
+  SessionEvent _chunkEvent(int seq, String text) => SessionEvent(
+        type: 'assistant/chunk',
+        seq: seq,
+        time: (1786723600000 + seq).toDouble(),
+        data: <String, dynamic>{
+          'turn': 1,
+          'step': 1,
+          'chunk': <String, dynamic>{
+            'type': 'text-delta',
+            'index': 0,
+            'text': text,
+          },
+        },
+      );
+
+  test('流式重算节流分档:纯 chunk 慢档(250ms)合并;结构事件立即落地', () async {
+    final view = _FakeView();
+    view.current = [_summary('s1')];
+    final log = view.logFor('s1');
+    final vm = ChatViewModel(store: view, connection: null);
+    view.emit();
+    await Future<void>.delayed(Duration.zero);
+
+    var notifications = 0;
+    vm.addListener(() => notifications++);
+
+    // 突发 20 个纯 chunk delta(同一轮):microtask 合并 + leading 立即。
+    for (var i = 0; i < 20; i++) {
+      log.append(_chunkEvent(100 + i, 'd$i '));
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(notifications, 1);
+    expect(vm.nodes.whereType<ChatNodeAssistant>().single.text, contains('d19'));
+
+    // 慢档窗口(250ms)内的后续 chunk:不重算,合并到尾沿。
+    for (var i = 20; i < 40; i++) {
+      log.append(_chunkEvent(100 + i, 'd$i '));
+    }
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(notifications, 1); // 尾沿(250ms)未到,仍是旧状态
+    // 过窗后尾沿落地:最终帧可见(纯流式下 UI 每窗至多一次全量重算)。
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(notifications, 2);
+    expect(vm.nodes.whereType<ChatNodeAssistant>().single.text, contains('d39'));
+
+    // 结构事件(非 chunk,如 user/message)不受慢档拖延:立即落地。
+    log.append(_msgEvent(500, 'user', '结构变化'));
+    await Future<void>.delayed(Duration.zero);
+    expect(notifications, 3);
+    expect(vm.bubbles.last.text, '结构变化');
+    vm.dispose();
+  });
+
   testWidgets('ChatScreen renders bubbles and phase badge', (tester) async {
     // testWidgets 的 body 跑在 fake-async zone:Future.delayed 在第一次 pump
     // 前永不落地 —— 一律用 tester.pump() 当微任务冲刷原语。
@@ -183,7 +279,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('hello'), findsOneWidget);
     expect(find.text('hi'), findsOneWidget);
-    expect(find.text('gen 3'), findsOneWidget);
+    // ready 态徽标改显「已连接」(「gen N」对用户表意不明,已重构;
+    // 代际诊断信息收进徽标 tooltip)。
+    expect(find.text('已连接'), findsOneWidget);
     vm.dispose();
   });
 }

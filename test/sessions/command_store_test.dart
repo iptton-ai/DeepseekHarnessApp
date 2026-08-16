@@ -1,6 +1,8 @@
-// CommandStore 域测试(W2-D):双层信封解析、agent-busy 降级、缓存与失效
+// CommandStore 域测试(W2-D):裸数组解析、业务错误降级、缓存与失效
 // (commands/change + agent-preset/selected 事件 + 代际翻转)、execute 预校验、
 // 合并目录(listAll)、fuzzy/命令名解析。
+// 契约锚定实测 rc.6 活体主机:commands/list 成功 value 为裸数组;业务失败
+// (agent-busy 等)在外层 RpcResult ok:false;skill.list 按 sessionId 寻址。
 // 模式:自建最小假主机(describe + commands/list|execute + skill.list + 双 WS 下行),
 // 不 import 共享 helper。
 import 'dart:convert';
@@ -13,10 +15,10 @@ import 'package:singleman/sessions/command_store.dart';
 import 'package:singleman/sessions/goal_store.dart';
 
 /// commands/list 的响应模式。
-enum _ListMode { ok, innerAgentBusy, outerAgentBusy, http500, timeout }
+enum _ListMode { ok, agentBusy, http500, timeout }
 
 /// commands/execute 的响应模式。
-enum _ExecMode { ok, innerError, outerError }
+enum _ExecMode { ok, outerError }
 
 /// 最小假主机:describe + 远程端点 + skill.list + 双 WS;可编程响应。
 class _FakeHost {
@@ -74,26 +76,8 @@ class _FakeHost {
       if (listMode == _ListMode.timeout) {
         return; // 挂起请求,触发客户端超时。
       }
-      final Map<String, dynamic> value;
-      switch (listMode) {
-        case _ListMode.ok:
-          value = <String, dynamic>{'ok': true, 'value': listCommands};
-        case _ListMode.innerAgentBusy:
-          value = <String, dynamic>{
-            'ok': false,
-            'error': <String, dynamic>{
-              'code': 'agent-busy',
-              'message': 'use subagent delivery',
-            },
-          };
-        case _ListMode.outerAgentBusy:
-          value = <String, dynamic>{};
-        case _ListMode.http500:
-        case _ListMode.timeout:
-          value = <String, dynamic>{};
-      }
-      if (listMode == _ListMode.outerAgentBusy) {
-        // 外层 RpcResult 直接 ok:false(防御路径)。
+      if (listMode == _ListMode.agentBusy) {
+        // 实测 wire:业务失败在外层 RpcResult ok:false(agent-busy 带 message)。
         await _respond(req, {
           'type': 'server-response',
           'rpcId': envelope['rpcId'],
@@ -108,10 +92,11 @@ class _FakeHost {
         });
         return;
       }
+      // 成功:value 是裸数组(typert 直连端点,无内层信封)。
       await _respond(req, {
         'type': 'server-response',
         'rpcId': envelope['rpcId'],
-        'result': <String, dynamic>{'ok': true, 'value': value},
+        'result': <String, dynamic>{'ok': true, 'value': listCommands},
       });
       return;
     }
@@ -125,21 +110,6 @@ class _FakeHost {
             'type': 'server-response',
             'rpcId': envelope['rpcId'],
             'result': <String, dynamic>{'ok': true},
-          });
-        case _ExecMode.innerError:
-          await _respond(req, {
-            'type': 'server-response',
-            'rpcId': envelope['rpcId'],
-            'result': <String, dynamic>{
-              'ok': true,
-              'value': <String, dynamic>{
-                'ok': false,
-                'error': <String, dynamic>{
-                  'code': 'command-error',
-                  'message': 'boom',
-                },
-              },
-            },
           });
         case _ExecMode.outerError:
           await _respond(req, {
@@ -162,6 +132,24 @@ class _FakeHost {
       if (skillListFails) {
         req.response.statusCode = 500;
         await req.response.close();
+        return;
+      }
+      // 实测 wire:skill.list 按 sessionId 寻址;缺参 bad-request。
+      final payload = envelope['payload'];
+      if (payload is! Map<String, dynamic> ||
+          payload['sessionId'] is! String) {
+        await _respond(req, {
+          'type': 'server-response',
+          'rpcId': envelope['rpcId'],
+          'result': <String, dynamic>{
+            'ok': false,
+            'error': <String, dynamic>{
+              'code': 'bad-request',
+              'message': 'invalid payload for skill.list',
+              'details': <String, dynamic>{},
+            },
+          },
+        });
         return;
       }
       await _respond(req, {
@@ -278,7 +266,7 @@ void main() {
       await host.stop();
     });
 
-    test('双层信封解析成功:裸数组 + input.hint', () async {
+    test('裸数组解析成功(实测 rc.6 wire):name/description/input.hint', () async {
       host.listCommands = [
         _command('compact', '紧凑显示', hint: 'on/off'),
         _command('export', '导出会话'),
@@ -293,8 +281,8 @@ void main() {
       expect(store.listCalls, 1);
     });
 
-    test('内层信封 ok:false(agent-busy)→ 空目录 + 错误位,不缓存', () async {
-      host.listMode = _ListMode.innerAgentBusy;
+    test('业务错误 agent-busy(外层 ok:false)→ 空目录 + 错误位,不缓存', () async {
+      host.listMode = _ListMode.agentBusy;
       final result = await store.listCommands('session-s1');
       expect(result.isDegraded, isTrue);
       expect(result.isAgentBusy, isTrue);
@@ -305,14 +293,6 @@ void main() {
       final again = await store.listCommands('session-s1');
       expect(again.isAgentBusy, isTrue);
       expect(store.listCalls, 2);
-    });
-
-    test('外层 RpcResult ok:false(agent-busy)防御降级', () async {
-      host.listMode = _ListMode.outerAgentBusy;
-      final result = await store.listCommands('session-s1');
-      expect(result.isDegraded, isTrue);
-      expect(result.isAgentBusy, isTrue);
-      expect(result.commands, isEmpty);
     });
 
     test('传输失败(http 500)→ 降级 transport,不缓存', () async {
@@ -430,18 +410,7 @@ void main() {
       expect(host.executeRequests, 0);
     });
 
-    test('execute:内层信封错误折叠为 CommandExecuteException', () async {
-      host.listCommands = [_command('compact', '紧凑显示')];
-      await store.listCommands('session-s1');
-      host.execMode = _ExecMode.innerError;
-      await expectLater(
-        store.execute('session-s1', '/compact'),
-        throwsA(isA<CommandExecuteException>()),
-      );
-      expect(host.executeRequests, 1);
-    });
-
-    test('execute:外层业务错误折叠为 CommandExecuteException', () async {
+    test('execute:业务错误折叠为 CommandExecuteException(带错误码)', () async {
       host.listCommands = [_command('compact', '紧凑显示')];
       await store.listCommands('session-s1');
       host.execMode = _ExecMode.outerError;
@@ -472,7 +441,7 @@ void main() {
     });
 
     test('listAll:命令 agent-busy 降级为 skill-only,技能仍可用', () async {
-      host.listMode = _ListMode.innerAgentBusy;
+      host.listMode = _ListMode.agentBusy;
       host.skills = [_skill('android', 'Android 开发')];
       final menu = await store.listAll('session-s1');
       expect(menu.degraded, isTrue);

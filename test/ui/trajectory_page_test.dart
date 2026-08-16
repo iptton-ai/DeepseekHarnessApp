@@ -6,55 +6,76 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:singleman/ui/trajectory_page.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
-SessionEvent _ev(int seq, String type, dynamic data, {double? time}) => SessionEvent(
+SessionEvent _ev(int seq, String type, dynamic data, {double? time}) =>
+    SessionEvent(
       type: type,
       seq: seq,
       time: time ?? 1786723605000 + seq.toDouble(),
       data: data,
     );
 
-SessionEvent _ts(int seq, {double? time}) => _ev(seq, 'turn/start', <String, dynamic>{}, time: time);
-SessionEvent _te(int seq, {double? time}) => _ev(seq, 'turn/end', <String, dynamic>{}, time: time);
+SessionEvent _ts(int seq, {double? time}) =>
+    _ev(seq, 'turn/start', <String, dynamic>{}, time: time);
+SessionEvent _te(int seq, {double? time}) =>
+    _ev(seq, 'turn/end', <String, dynamic>{}, time: time);
 
 SessionEvent _user(int seq, String text) => _ev(seq, 'user/message', {
-      'content': <Map<String, dynamic>>[
-        {'type': 'text', 'text': text},
-      ],
-    });
+  'content': <Map<String, dynamic>>[
+    {'type': 'text', 'text': text},
+  ],
+});
 
 SessionEvent _assistant(int seq, String text) => _ev(seq, 'assistant/message', {
-      'message': <String, dynamic>{
-        'content': <Map<String, dynamic>>[
-          {'type': 'text', 'text': text},
-        ],
-      },
-    });
+  'message': <String, dynamic>{
+    'content': <Map<String, dynamic>>[
+      {'type': 'text', 'text': text},
+    ],
+  },
+});
 
 /// 双轮 + 一条轮外事件的完整样例流。
 List<SessionEvent> _sampleEvents() => <SessionEvent>[
-      _ts(1),
-      _user(2, '第一轮提问'),
-      _assistant(3, '第一轮回答'),
-      _te(4),
-      _ev(5, 'compaction/start', <String, dynamic>{}),
-      _ts(6),
-      _user(7, '第二轮提问'),
-      _assistant(8, '第二轮回答'),
-      _te(9),
-    ];
+  _ts(1),
+  _user(2, '第一轮提问'),
+  _assistant(3, '第一轮回答'),
+  _te(4),
+  _ev(5, 'compaction/start', <String, dynamic>{}),
+  _ts(6),
+  _user(7, '第二轮提问'),
+  _assistant(8, '第二轮回答'),
+  _te(9),
+];
 
-Future<void> _pumpPage(WidgetTester tester, List<SessionEvent> events,
-    {Size size = const Size(360, 800), bool hasOlder = false}) async {
+List<SessionEvent> _manyTurns(int count) {
+  final out = <SessionEvent>[];
+  var seq = 1;
+  for (var i = 0; i < count; i++) {
+    out.add(_ts(seq++));
+    out.add(_user(seq++, '第$i轮提问'));
+    out.add(_assistant(seq++, '第$i轮回答'));
+    out.add(_te(seq++));
+  }
+  return out;
+}
+
+Future<void> _pumpPage(
+  WidgetTester tester,
+  List<SessionEvent> events, {
+  Size size = const Size(360, 800),
+  bool hasOlder = false,
+}) async {
   await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
-  await tester.pumpWidget(MaterialApp(
-    home: TrajectoryPage(
-      sessionId: 's1',
-      events: events,
-      hasOlder: hasOlder,
-      onLoadOlder: () async {},
+  await tester.pumpWidget(
+    MaterialApp(
+      home: TrajectoryPage(
+        sessionId: 's1',
+        events: events,
+        hasOlder: hasOlder,
+        onLoadOlder: () async {},
+      ),
     ),
-  ));
+  );
   await tester.pump();
 }
 
@@ -145,21 +166,40 @@ void main() {
     var calls = 0;
     await tester.binding.setSurfaceSize(const Size(360, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.pumpWidget(MaterialApp(
-      home: TrajectoryPage(
-        sessionId: 's1',
-        events: _sampleEvents(),
-        hasOlder: true,
-        onLoadOlder: () async {
-          calls += 1;
-        },
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TrajectoryPage(
+          sessionId: 's1',
+          events: _sampleEvents(),
+          hasOlder: true,
+          onLoadOlder: () async {
+            calls += 1;
+          },
+        ),
       ),
-    ));
+    );
     await tester.pump();
     expect(find.text('加载更早'), findsOneWidget);
     await tester.tap(find.text('加载更早'));
     await tester.pumpAndSettle();
     expect(calls, 1);
+  });
+
+  testWidgets('回到尾部 FAB:大列表点击后收敛到尾部且不抛异常', (tester) async {
+    await _pumpPage(tester, _manyTurns(80));
+
+    await tester.drag(find.byType(ListView), const Offset(0, -2400));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('回到尾部'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('回到尾部'));
+    await tester.pumpAndSettle();
+
+    final position = tester
+        .state<ScrollableState>(find.byType(Scrollable).first)
+        .position;
+    expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('宽屏(1200dp):行内两列渲染无溢出冒烟', (tester) async {

@@ -11,6 +11,22 @@
 // - tool/call|result:工具卡;result 的 callId/输出藏在
 //   data.message.source.callId 与 data.message.content[].tool-result 里,
 //   无 view 的历史回放也能完整渲染
+// - 中断/异常落点(0.1.0-rc.6 权威形状):
+//   * 取消轮次:宿主对未派发调用补写合成 tool/result,data.error =
+//     {name:'AbortError', code:'ABORTED_BEFORE_DISPATCH'};已派发被中断的
+//     code='ABORTED';崩溃修复(重载后补)是 TOOL_OUTCOME_UNKNOWN /
+//     TOOL_NOT_STARTED。这些 code → ToolStatus.interrupted(琥珀「中断」),
+//     与 web 的 block.error?.code === 'interrupted' 客户端合成语义对齐
+//   * turn/end 携带 data.reason(dsh-session TurnEndReasonMap):
+//     completed | aborted(user/parent/hook/disposed)| blocked |
+//     error(结构化 LlmFailure)| max-tokens | interrupted(崩溃孤儿)。
+//     reason≠completed/blocked 产出提示节点(error → ChatNodeError,
+//     其余 → ChatNodeNotice)
+//   * step/end、turn/end 闭合时仍未配到结果的运行卡结算为 interrupted
+//     (web interruption() 同款规则:所在 step/turn 已关闭 ⇒ 未结算调用
+//     视为中断)——消灭「中断后永远转圈」
+//   * view(dsh-tools presentation 词表)只有 card/title/output 等
+//     渲染字段,不含 status/interrupted/ok —— 状态判定以 event.data 为准
 // - tool/code-dispatch*:run_code 派发的内部子调用,归入内部事件(父卡已
 //   汇总输出,重复展示只是噪音)
 // - approval/asked|decided:审批轨迹短提示(注意:approval/resolved 是 mux
@@ -75,7 +91,8 @@ class ChatNodeAssistant extends ChatNode {
   final bool streaming;
 }
 
-/// think 折叠块(默认收起,点开显示全文;streaming 时 UI 自动展开)。
+/// think 折叠块(默认收起,点开显示全文;streaming 时 UI 在标题行滚动
+/// 显示最后一行,不自动展开)。
 class ChatNodeThink extends ChatNode {
   const ChatNodeThink({
     required super.seq,
@@ -228,7 +245,14 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
     final kind = _toolKind(event, view);
     if (kind == _ToolKind.call) {
       final node = _buildToolCall(event, view);
-      pending.add(_PendingCall(result.length, node.callId));
+      pending.add(
+        _PendingCall(
+          result.length,
+          node.callId,
+          turn: _intOf(event.data, ['turn']),
+          step: _intOf(event.data, ['step']),
+        ),
+      );
       result.add(node);
     } else if (kind == _ToolKind.result) {
       final node = _buildToolResult(event, view);
@@ -243,6 +267,20 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
         result.add(node); // 无配对结果的独立卡(按 view 判定状态)。
       }
     } else {
+      // step/turn 闭合:范围内仍无结果的运行卡结算为中断(web interruption()
+      // 同款规则 —— 宿主在关闭前必已提交结果,关闭时仍缺 = 永不再来)。
+      if (event.type == 'step/end') {
+        final t = _intOf(event.data, ['turn']);
+        final s = _intOf(event.data, ['step']);
+        // 字段齐全才做精确匹配;缺字段的 step 边界不结算(留给 turn 边界兜底)。
+        if (t != null && s != null) {
+          _settlePending(pending, result, turn: t, step: s, seq: event.seq);
+        }
+      } else if (event.type == 'turn/end') {
+        // turn 边界落定一切:seq 序保证此前事件属于已闭合范围
+        //(call 缺 turn 字段的防御形状也只能靠这里兜住)。
+        _settlePending(pending, result, seq: event.seq);
+      }
       result.addAll(_nodesFor(event));
     }
   }
@@ -276,10 +314,47 @@ _ToolKind _toolKind(SessionEvent event, ToolEventView? view) {
 }
 
 class _PendingCall {
-  const _PendingCall(this.index, this.callId);
+  const _PendingCall(this.index, this.callId, {this.turn, this.step});
   final int index;
   final String? callId;
+
+  /// call 所属 (turn, step)(dsh appendToolCall 必写;防御性可空)。
+  final int? turn;
+  final int? step;
 }
+
+/// 闭合结算:turn/step 均给定时只精确命中同范围的调用,均缺省时结算全部
+/// (turn 边界语义)。倒序遍历安全移除;卡的 seq 保持 call 位(key 稳定)。
+void _settlePending(
+  List<_PendingCall> pending,
+  List<ChatNode> result, {
+  int? turn,
+  int? step,
+  required int seq,
+}) {
+  if (pending.isEmpty) return;
+  final precise = turn != null && step != null;
+  for (var i = pending.length - 1; i >= 0; i--) {
+    final p = pending[i];
+    if (precise && (p.turn != turn || p.step != step)) continue;
+    pending.removeAt(i);
+    result[p.index] = _interruptedCall(result[p.index] as ChatNodeTool, seq);
+  }
+}
+
+/// 运行卡 → 中断卡(闭合时无结果):状态与 resultSeq 取结算事件,
+/// 输出/错误不合成文本 —— 中断原因由紧随的轮次级提示节点交代。
+ChatNodeTool _interruptedCall(ChatNodeTool call, int seq) => ChatNodeTool(
+      seq: call.seq,
+      type: call.type,
+      toolName: call.toolName,
+      callId: call.callId,
+      input: call.input,
+      summary: call.summary,
+      status: ToolStatus.interrupted,
+      callSeq: call.callSeq ?? call.seq,
+      resultSeq: seq,
+    );
 
 /// 配对:先按 callId 精确匹配,否则取最近(最后加入)的未配对 call。
 int _matchPending(List<_PendingCall> pending, String? callId) {
@@ -330,9 +405,17 @@ ChatNodeTool _buildToolResult(SessionEvent event, ToolEventView? view) {
     'data',
   ]) ?? _resultText(event.data);
   final isError = _resultIsError(event.data);
+  final code = _errorCodeOf(event.data, viewMap);
+  // error 文本:message 优先;isError 的输出提升仅限非中断结果(中断卡
+  // 不显示红错误框,输出文本原样留在输出区 —— 对齐 web stopped 语义)。
   final error = _errorOf(event.data, viewMap) ??
-      (isError && output is String && output.isNotEmpty ? output : null);
-  final status = _statusOf(viewMap, error);
+      (isError &&
+              !_isInterruptCode(code) &&
+              output is String &&
+              output.isNotEmpty
+          ? output
+          : null);
+  final status = _statusOf(code, error);
   final summary =
       _pickString(viewMap, ['summary', 'title', 'label']) ??
       _preview(output ?? error, 60);
@@ -459,6 +542,11 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
     if (finalized.contains(key)) return;
     final m = meta[key]!;
     final streaming = m.lastSeq >= maxSettleSeq;
+    // seq 用 firstSeq(块首事件):流式期间每个 delta 都会把 lastSeq 推高,
+    // 若节点 seq 跟着变,列表 ValueKey 每 66ms 一换 → item State 全量销毁
+    // 重建(think 展开态丢失、尾随滚动动画每帧重置、TextPainter 缓存
+    // 失效)——这正是「生成中无法保持展开」与流式滚动卡顿的根因之一。
+    // firstSeq 在块生命周期内不变,排序仍单调(组按首次出现序创建)。
     final reasoning = blocks
         .where((b) => b.kind == 'reasoning' && b.text.isNotEmpty)
         .map((b) => b.text.toString())
@@ -470,7 +558,7 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
     if (reasoning.isNotEmpty) {
       nodes.add(
         ChatNodeThink(
-          seq: m.lastSeq,
+          seq: m.firstSeq,
           type: 'assistant/chunk/reasoning',
           text: reasoning,
           streaming: streaming,
@@ -480,7 +568,7 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
     if (text.isNotEmpty) {
       nodes.add(
         ChatNodeAssistant(
-          seq: m.lastSeq,
+          seq: m.firstSeq,
           type: 'assistant/chunk',
           text: text,
           streaming: streaming,
@@ -588,8 +676,11 @@ dynamic _maybeDecodeJson(dynamic v) {
   }
 }
 
-/// 摘要种子:bash 类工具取 command,其余走整体格式化。
-String? _summarySeed(String name, dynamic input) {
+/// 摘要种子:bash 类工具取 command、read 类取 path,其余**原样交给
+/// _preview 格式化**(Map/List 走缩进 JSON)—— 返回类型必须是 dynamic:
+/// 声明 String? 时 Map 兜底分支会发生运行时隐式下转崩溃
+/// (type '_Map<String, dynamic>' is not a subtype of 'String?')。
+dynamic _summarySeed(String name, dynamic input) {
   if (input is Map) {
     final n = name.toLowerCase();
     final cmdKeys = const ['command', 'cmd', 'script'];
@@ -736,6 +827,9 @@ List<ChatNode> _nodesFor(SessionEvent event) {
       ),
     ];
   }
+  if (type == 'turn/end') {
+    return _turnEndNodes(event);
+  }
   if (type == 'turn/error' || type.startsWith('turn/error')) {
     final message = _pick(data, null, ['message', 'error', 'text']) ?? type;
     return [ChatNodeError(seq: event.seq, type: type, message: message)];
@@ -760,6 +854,91 @@ String? _retryReason(dynamic data) {
     }
   }
   return null;
+}
+
+/// turn/end → 提示节点(0.1.0-rc.6 权威形状:data.reason.kind ∈
+/// completed|aborted|blocked|error|max-tokens|interrupted)。
+/// completed/blocked 不占位(blocked 的等待感由审批交互卡表达,web 亦无
+/// 渲染);其余终态各一行,给中断/异常轮次一个明确交代。
+List<ChatNode> _turnEndNodes(SessionEvent event) {
+  final reason = event.data is Map ? (event.data as Map)['reason'] : null;
+  final kind = reason is Map ? reason['kind'] : null;
+  switch (kind) {
+    case 'aborted':
+      return [
+        ChatNodeNotice(
+          seq: event.seq,
+          type: event.type,
+          title: '本轮已停止',
+          detail: _abortedDetail(reason),
+          icon: 'stop',
+        ),
+      ];
+    case 'error':
+      return [
+        ChatNodeError(
+          seq: event.seq,
+          type: event.type,
+          message: _failureText(reason['error']),
+        ),
+      ];
+    case 'max-tokens':
+      return [
+        ChatNodeNotice(
+          seq: event.seq,
+          type: event.type,
+          title: '输出已达长度上限',
+          icon: 'info',
+        ),
+      ];
+    case 'interrupted':
+      return [
+        ChatNodeNotice(
+          seq: event.seq,
+          type: event.type,
+          title: '会话异常中断',
+          detail: '主机异常退出,本轮未正常结束',
+          icon: 'warning',
+        ),
+      ];
+    default:
+      return const []; // completed / blocked / 未知变体:不占位。
+  }
+}
+
+/// aborted 终止原因(TurnEndCancelCause:user|parent|hook|disposed|legacy)。
+String? _abortedDetail(Map<dynamic, dynamic> reason) {
+  final cause = reason['reason'];
+  if (cause is! Map) return null;
+  switch (cause['kind']) {
+    case 'user':
+      return '用户停止';
+    case 'parent':
+      return '父级会话停止';
+    case 'hook':
+      final r = cause['reason'];
+      return r is String && r.isNotEmpty ? '钩子停止: $r' : '钩子停止';
+    case 'disposed':
+      return '会话已释放';
+    default:
+      return null; // legacy 等粗粒度记录
+  }
+}
+
+/// 轮次失败文本(reason.error = LlmFailure {message, code};
+/// code 为 UNKNOWN 时不拼,避免噪音)。
+String _failureText(dynamic failure) {
+  if (failure is Map) {
+    final message = failure['message'];
+    final code = failure['code'];
+    if (message is String && message.isNotEmpty) {
+      return code is String && code.isNotEmpty && code != 'UNKNOWN'
+          ? '$message ($code)'
+          : message;
+    }
+    if (code is String && code.isNotEmpty) return code;
+  }
+  return '轮次失败';
 }
 
 ChatNodeNotice? _noticeFor(SessionEvent event) {
@@ -1031,6 +1210,7 @@ List<TodoItem> _todoItems(dynamic data) {
 }
 
 /// 错误文本:error 字段可能是字符串或 {message}。
+/// (只认 message —— {name, code} 形状是中断类错误,不进红错误框。)
 String? _errorOf(dynamic data, Map<String, dynamic>? viewMap) {
   for (final src in <dynamic>[viewMap, data is Map ? data : null]) {
     if (src == null) continue;
@@ -1044,29 +1224,43 @@ String? _errorOf(dynamic data, Map<String, dynamic>? viewMap) {
   return null;
 }
 
-/// 状态判定:view 的 status/error/interrupted/ok 字段优先,否则 data 的 error。
-ToolStatus _statusOf(Map<String, dynamic>? viewMap, String? error) {
-  if (viewMap != null) {
-    final s = viewMap['status'];
-    if (s is String) {
-      switch (s.toLowerCase()) {
-        case 'running':
-          return ToolStatus.running;
-        case 'failed':
-        case 'error':
-          return ToolStatus.failed;
-        case 'interrupted':
-        case 'cancelled':
-        case 'canceled':
-        case 'stopped':
-          return ToolStatus.interrupted;
-        default:
-          return ToolStatus.success;
-      }
+/// 错误码提取:tool/result 的 data.error = {name, code}(dsh 权威形状:
+/// AbortError/ABORTED*、TOOL_OUTCOME_UNKNOWN/TOOL_NOT_STARTED)。
+String? _errorCodeOf(dynamic data, Map<String, dynamic>? viewMap) {
+  for (final src in <dynamic>[data is Map ? data : null, viewMap]) {
+    if (src == null) continue;
+    final e = src['error'];
+    if (e is Map) {
+      final code = e['code'];
+      if (code is String && code.isNotEmpty) return code;
     }
-    if (viewMap['error'] != null) return ToolStatus.failed;
-    if (viewMap['interrupted'] == true) return ToolStatus.interrupted;
-    if (viewMap['ok'] == false) return ToolStatus.failed;
+    if (e is String && e.isNotEmpty) return e;
+  }
+  return null;
+}
+
+/// 中断类错误码全集(0.1.0-rc.6):运行中被取消 / 派发前被跳过 /
+/// 崩溃修复补记的两种未知结局。web 客户端合成的 'interrupted' 同义。
+const Set<String> _kInterruptCodes = {
+  'ABORTED',
+  'ABORTED_BEFORE_DISPATCH',
+  'TOOL_OUTCOME_UNKNOWN',
+  'TOOL_NOT_STARTED',
+  'INTERRUPTED',
+};
+
+bool _isInterruptCode(String? code) =>
+    code != null && _kInterruptCodes.contains(code.toUpperCase());
+
+/// 状态判定:data.error.code 权威 —— 中断类 → interrupted,其余 code →
+/// failed;无 code 时 error 文本 → failed,否则 success。
+/// view 词表(dsh-tools presentation)不含 status/interrupted/ok 字段,
+/// 不参与判定。
+ToolStatus _statusOf(String? code, String? error) {
+  if (code != null) {
+    return _isInterruptCode(code)
+        ? ToolStatus.interrupted
+        : ToolStatus.failed;
   }
   return error != null ? ToolStatus.failed : ToolStatus.success;
 }

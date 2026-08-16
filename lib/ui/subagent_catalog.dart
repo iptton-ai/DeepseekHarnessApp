@@ -382,42 +382,66 @@ class _SubagentTranscriptPageState extends State<SubagentTranscriptPage> {
           Expanded(
             child: _error != null && _transcript.events.isEmpty
                 ? _ErrorRetry(message: _error!, onRetry: _load)
-                : ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    children: [
-                      // 更早历史分页(性能契约:打开只拉尾页,这里按需向前补)。
-                      if (_transcript.hasOlder)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(
-                              minimumSize: const Size.fromHeight(44),
-                            ),
-                            onPressed: _loadOlder,
-                            child: const Text('加载更早', style: TextStyle(fontSize: 13)),
-                          ),
-                        ),
-                      if (_error != null)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          child: Text('部分事件未加载: ${_error!}',
-                              style: const TextStyle(color: Colors.red, fontSize: 12)),
-                        ),
-                      for (final e in _transcript.events) _eventTile(context, e),
-                      if (_transcript.events.isEmpty && _error == null)
-                        const Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Center(
-                              child: Text('该子代理暂无事件',
-                                  style: TextStyle(color: Colors.grey))),
-                        ),
-                    ],
-                  ),
+                : _buildEventList(),
           ),
           _composer(context),
         ],
       ),
     );
+  }
+
+  /// 事件列表:前导条目(加载更早/错误提示)+ 事件本体,全部走 ListView.builder
+  /// 虚拟化 —— 单页 transcript 可达上千事件,一次性 children 全构建会卡 UI。
+  Widget _buildEventList() {
+    final events = _transcript.events;
+    final leading = <Widget>[
+      // 更早历史分页(性能契约:打开只拉尾页,这里按需向前补)。
+      if (_transcript.hasOlder)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(44),
+            ),
+            onPressed: _loadOlder,
+            child: const Text('加载更早', style: TextStyle(fontSize: 13)),
+          ),
+        ),
+      if (_error != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Text('部分事件未加载: ${_error!}',
+              style: const TextStyle(color: Colors.red, fontSize: 12)),
+        ),
+    ];
+    final trailingCount =
+        events.isEmpty && _error == null ? 1 : 0; // 空态占位。
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: leading.length + events.length + trailingCount,
+      itemBuilder: (context, i) {
+        if (i < leading.length) return leading[i];
+        final eventIndex = i - leading.length;
+        if (eventIndex < events.length) {
+          return _eventTile(context, events[eventIndex]);
+        }
+        return const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(
+              child: Text('该子代理暂无事件',
+                  style: TextStyle(color: Colors.grey))),
+        );
+      },
+    );
+  }
+
+  /// 事件文本展示上限(字符);超长截断并标注总长。
+  static const int _kEventTextCap = 4000;
+
+  String _cappedEventText(String text) {
+    if (text.isEmpty) return '(无文本内容)';
+    if (text.length <= _kEventTextCap) return text;
+    return '${text.substring(0, _kEventTextCap)}\n…(共 ${text.length} 字符,已截断)';
   }
 
   Widget _eventTile(BuildContext context, SessionEvent e) {
@@ -426,6 +450,7 @@ class _SubagentTranscriptPageState extends State<SubagentTranscriptPage> {
         ? '用户'
         : (e.type == 'assistant/message' ? '助手' : e.type);
     return Padding(
+      key: ValueKey('subagent-event-${e.seq}'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -434,7 +459,9 @@ class _SubagentTranscriptPageState extends State<SubagentTranscriptPage> {
               style: const TextStyle(
                   fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey)),
           const SizedBox(height: 2),
-          Text(text.isEmpty ? '(无文本内容)' : text),
+          // 单条文本截断保护:超长事件(如整文件 read 结果)只显示首段,
+          // 避免巨型 Text 布局卡 UI(截断在字符串层,不是 maxLines)。
+          Text(_cappedEventText(text)),
         ],
       ),
     );

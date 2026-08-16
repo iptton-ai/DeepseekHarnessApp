@@ -1,5 +1,5 @@
 // W3-C 移动可用性验收(360dp):ThemeModeRow 三选一切换回调 + ≥48dp 触控区 +
-// 流驱动选中态 + CAS 冲突 SnackBar;WelcomeOnboarding 三步推进/不再提示/
+// 流驱动选中态 + CAS 冲突 SnackBar;WelcomeOnboarding 三步推进/任意关闭持久化/
 // 移动全屏化/shouldShow 逻辑(假通道,不 import 共享 helper)。
 import 'dart:async';
 
@@ -71,6 +71,23 @@ class _FakeOnboardingChannel implements OnboardingChannel {
     if (writeFails) return false;
     version = v;
     return true;
+  }
+}
+
+/// 写永不完成的通道(回归:「完成」不得等待网络写)。
+class _HangingWriteChannel implements OnboardingChannel {
+  int writeCalls = 0;
+
+  @override
+  String? get welcomeVersion => null;
+
+  @override
+  Future<void> load() async {}
+
+  @override
+  Future<bool> setWelcomeVersion(String v) {
+    writeCalls += 1;
+    return Completer<bool>().future; // 永不完成。
   }
 }
 
@@ -186,7 +203,7 @@ void main() {
 
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsOneWidget);
+      expect(find.text('欢迎使用 DshAPP'), findsOneWidget);
       // 进度点 3 个。
       expect(find.byKey(const ValueKey('onboarding-dot-0')), findsOneWidget);
       expect(find.byKey(const ValueKey('onboarding-dot-1')), findsOneWidget);
@@ -202,7 +219,7 @@ void main() {
       // 上一步回退。
       await tester.tap(find.byKey(const ValueKey('onboarding-back')));
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsOneWidget);
+      expect(find.text('欢迎使用 DshAPP'), findsOneWidget);
 
       // 直达完结并完成。
       await tester.tap(find.byKey(const ValueKey('onboarding-next')));
@@ -212,12 +229,12 @@ void main() {
       expect(find.text('开始使用'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('onboarding-next'))); // 完成。
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsNothing); // sheet 已关。
+      expect(find.text('欢迎使用 DshAPP'), findsNothing); // sheet 已关。
       expect(ch.writeCalls, 1);
       expect(ch.lastWritten, kWelcomeNoticeVersion);
     });
 
-    testWidgets('不再提示:写 settings + 关闭 + 本会话不再出现', (tester) async {
+    testWidgets('点背板关闭:同样写版本(任意退出即视为已看)', (tester) async {
       await tester.binding.setSurfaceSize(const Size(360, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final ch = _FakeOnboardingChannel(); // 读不到 → 降级本地:显示。
@@ -228,14 +245,35 @@ void main() {
 
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('onboarding-dismiss')));
+      expect(find.text('欢迎使用 DshAPP'), findsOneWidget);
+      // 点 sheet 之外(屏顶)关背板。
+      await tester.tapAt(const Offset(180, 20));
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsNothing);
+      expect(find.text('欢迎使用 DshAPP'), findsNothing);
       expect(ch.writeCalls, 1);
       expect(ch.lastWritten, kWelcomeNoticeVersion);
       expect(controller.isDismissed, isTrue);
       expect(await controller.shouldShow(), isFalse);
+    });
+
+    testWidgets('「完成」不等网络写:写挂起时 sheet 也即刻关闭(回归)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final ch = _HangingWriteChannel();
+      final controller = WelcomeOnboardingController(ch);
+      await tester.pumpWidget(
+        _host((ctx) => maybeShowWelcomeOnboarding(ctx, controller: controller)),
+      );
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      for (var i = 0; i < 3; i++) {
+        await tester.tap(find.byKey(const ValueKey('onboarding-next')));
+        await tester.pumpAndSettle();
+      }
+      // 第三次点的是「完成」:版本写仍在飞,sheet 已关。
+      expect(find.text('欢迎使用 DshAPP'), findsNothing);
+      expect(ch.writeCalls, 1);
     });
 
     testWidgets('360dp 引导内容全屏化:sheet 高度 ≥ 屏高 80%', (tester) async {
@@ -266,7 +304,7 @@ void main() {
 
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
-      expect(find.text('欢迎使用 singleman'), findsNothing);
+      expect(find.text('欢迎使用 DshAPP'), findsNothing);
       expect(ch.loadCalls, 0); // 已读过,不发读请求。
     });
   });

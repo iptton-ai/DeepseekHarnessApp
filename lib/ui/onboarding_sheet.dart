@@ -7,16 +7,19 @@
 // 状态持久化(docs/audit/conversation.md §2/§3 + 活体 describe 实证):
 // - settings 命名空间 "ui-onboarding" 的 welcomeNoticeVersion 字段
 //   (活体当前值 "2026-08-13.1" → kWelcomeNoticeVersion)
-// - 用户值 == 当前版本 → 已看过,不再显示;「不再提示」/「完成」写该版本
+// - 用户值 == 当前版本 → 已看过,不再显示;sheet 以任意方式关闭(完成按钮/
+//   点背板/下拉)后由 maybeShow 统一后台写一次该版本(不阻塞关闭)
 // - 读写经注入薄通道 OnboardingChannel(集成方用 SettingsStore.scope('ui-onboarding')
 //   适配:snapshot 读 value.welcomeNoticeVersion、setField 写、load 重读)
-// - 读失败(未加载/LAN 403)→ 降级本地:默认显示,「不再提示」本地标记兜底,
+// - 读失败(未加载/LAN 403)→ 降级本地:默认显示;写失败本地标记兜底,
 //   本会话不再出现
 //
 // 形态与移动硬性:
 // - 底部 sheet(showModalBottomSheet);窄屏(<600dp)步骤内容全屏化
 //   (高度 ≈92% 屏),宽屏限高 420 居中内容
-// - 步骤间进度点;上一步/下一步/完成;每步可「不再提示」
+// - 步骤间进度点;上一步/下一步(末步「完成」即关闭)——按钮路径零 await
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 
 /// 当前欢迎公告版本(与活体 ui-onboarding.welcomeNoticeVersion 值对齐)。
@@ -91,21 +94,20 @@ Future<void> maybeShowWelcomeOnboarding(
       borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
     ),
     clipBehavior: Clip.antiAlias,
-    builder: (context) =>
-        WelcomeOnboarding(controller: controller, onFinished: onFinished),
+    builder: (context) => WelcomeOnboarding(controller: controller),
   );
+  // sheet 以任意方式关闭(完成按钮/点背板/下拉)→ 后台写一次「已看」版本。
+  // 不在按钮点击路径里 await 网络写:此前先写后关,首连未就绪时写挂起,
+  // 「完成/不再提示」看起来点了没反应。写失败由控制器本地兜底。
+  unawaited(controller.dismiss());
+  onFinished?.call();
 }
 
 /// 三步引导 sheet 体:欢迎(双形态)→ 连接形态提示 → 完结。
 class WelcomeOnboarding extends StatefulWidget {
-  const WelcomeOnboarding({
-    super.key,
-    required this.controller,
-    this.onFinished,
-  });
+  const WelcomeOnboarding({super.key, required this.controller});
 
   final WelcomeOnboardingController controller;
-  final VoidCallback? onFinished;
 
   @override
   State<WelcomeOnboarding> createState() => _WelcomeOnboardingState();
@@ -124,8 +126,8 @@ const List<_Step> _steps = <_Step>[
   _Step(
     '你的 AI 工作台',
     Icons.auto_awesome,
-    '欢迎使用 singleman',
-    'singleman 是 dsh 桌面 GUI 的 Flutter 客户端,支持桌面与移动双形态。'
+    '欢迎使用 DshAPP',
+    'DshAPP 是 dsh 桌面 GUI 的 Flutter 客户端,支持桌面与移动双形态。'
         '桌面端提供完整工作区与设置能力;移动端为触控优化,常用操作一触即达,'
         '两个形态共用同一份会话与配置。',
     ['桌面 + 移动', '会话同步', '触控优化'],
@@ -151,13 +153,14 @@ const List<_Step> _steps = <_Step>[
 
 class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
   int _index = 0;
-  bool _busy = false;
 
   bool get _isLast => _index == _steps.length - 1;
 
   void _next() {
     if (_isLast) {
-      _finish();
+      // 关闭即完成;版本持久化由 maybeShow 在 sheet 关闭后统一收口
+      // (点击路径零 await,网络写慢/挂起也不影响关闭)。
+      Navigator.of(context).pop();
     } else {
       setState(() => _index += 1);
     }
@@ -166,16 +169,6 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
   void _back() {
     if (_index == 0) return;
     setState(() => _index -= 1);
-  }
-
-  /// 「不再提示」/「完成」:写 settings(失败本地兜底)后关闭。
-  Future<void> _finish() async {
-    if (_busy) return;
-    _busy = true;
-    await widget.controller.dismiss();
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    widget.onFinished?.call();
   }
 
   @override
@@ -254,7 +247,7 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
             ),
             const SizedBox(width: 9),
             Text(
-              'singleman',
+              'DshAPP',
               style: TextStyle(
                 color: scheme.onSurface,
                 fontSize: 14,
@@ -335,7 +328,8 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
           children: [for (var i = 0; i < _steps.length; i++) _dot(scheme, i)],
         ),
         const SizedBox(height: 14),
-        // 按钮行:上一步 / 不再提示 / 下一步(完成)。
+        // 按钮行:上一步 / 下一步(末步「完成」)。单一 CTA ——
+        // sheet 本就每版本只弹一次,「不再提示」与「完成」语义重复,已删。
         Row(
           children: [
             if (_index > 0)
@@ -347,12 +341,6 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
             else
               const SizedBox(width: 64),
             const Spacer(),
-            TextButton(
-              key: const ValueKey('onboarding-dismiss'),
-              onPressed: _finish,
-              child: const Text('不再提示'),
-            ),
-            const SizedBox(width: 4),
             FilledButton(
               key: const ValueKey('onboarding-next'),
               onPressed: _next,
@@ -424,7 +412,7 @@ class _WelcomeOnboardingState extends State<WelcomeOnboarding> {
             left: 16,
             top: 15,
             child: Text(
-              'SINGLEMAN / CORE',
+              'DSHAPP / CORE',
               style: TextStyle(
                 color: scheme.onSurfaceVariant.withValues(alpha: .82),
                 fontSize: 9,

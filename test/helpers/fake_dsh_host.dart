@@ -27,9 +27,20 @@ class FakeDshHost {
 
   int describeCalls = 0;
   int listCalls = 0;
+  int historyCalls = 0;
+
+  /// 接下来 N 次 session.history 返回 HTTP 500(载波错误,可重试);0 = 正常。
+  int failSessionHistoryTimes = 0;
   bool hangDescribe = false;
   bool wrongRpcIdEcho = false;
   bool businessError = false;
+
+  /// 非空时挂住 session.list 响应(complete 即放行)。
+  Completer<void>? listGate;
+
+  /// 按会话覆写 session.history 尾页的 projections.values
+  /// (默认只带 imageLimits;测试全量基线清除语义时登记完整键集)。
+  final historyProjectionOverrides = <String, Map<String, dynamic>>{};
   final sessions = <String, List<Map<String, dynamic>>>{};
   final summaries = <Map<String, dynamic>>[];
   final promptRequests = <Map<String, dynamic>>[];
@@ -37,6 +48,10 @@ class FakeDshHost {
   final respondCalls = <Map<String, dynamic>>[];
   // rpcId -> 待应答类别(approval/question)
   final pendingRespondable = <String, String>{};
+  // rpcId -> 仍待应答的 requested 帧原文(mux open 时原样重放,模拟真
+  // host 基线重放:still-pending 的 approval/question 帧同 rpcId 重发,
+  // 已 resolved 的绝不重放)。
+  final replayable = <String, Map<String, dynamic>>{};
   final resolvedFrames = <Map<String, dynamic>>[];
   bool rejectNextRespond = false;
   String nextRespondRejectReason = 'not-pending';
@@ -116,24 +131,37 @@ class FakeDshHost {
       listCalls += 1;
       final body = await utf8.decoder.bind(req).join();
       final envelope = jsonDecode(body) as Map<String, dynamic>;
+      // 门闸:非空时挂住响应(测试制造「HTTP 响应慢于 WS 帧」竞态)。
+      final gate = listGate;
+      if (gate != null) await gate.future;
       await _ok(req, envelope['rpcId'] as String, {'items': summaries});
       return;
     }
     if (req.method == 'POST' && path == '/api/session.history') {
+      historyCalls += 1;
       final body = await utf8.decoder.bind(req).join();
       final envelope = jsonDecode(body) as Map<String, dynamic>;
       final payload = envelope['payload'] as Map<String, dynamic>;
+      if (failSessionHistoryTimes > 0) {
+        failSessionHistoryTimes -= 1;
+        req.response.statusCode = 500;
+        req.response.write('boom');
+        await req.response.close();
+        return;
+      }
       final sessionId = payload['sessionId'] as String;
       final events = sessions[sessionId] ?? <Map<String, dynamic>>[];
       final items = events
           .map((e) => <String, dynamic>{'event': e})
           .toList(growable: false);
+      // 尾页投影覆写:登记该会话的投影键集合(测试全量基线清除语义)。
+      final override = historyProjectionOverrides[sessionId];
       await _ok(req, envelope['rpcId'] as String, {
         'events': items,
         'hasMore': false,
         'projections': {
           'asOfSeq': items.isEmpty ? -1 : (items.last['event'] as Map)['seq'] as int,
-          'values': {
+          'values': override ?? {
             'imageLimits': {
               'maxImageBytes': 10 * 1024 * 1024,
               'maxImagesPerMessage': 4,
@@ -215,6 +243,7 @@ class FakeDshHost {
         receipt = {'accepted': false, 'reason': 'not-pending'};
       } else {
         final kind = pendingRespondable.remove(rpcId)!;
+        replayable.remove(rpcId);
         // 服务端语义:应答成功后推 resolved 帧清场。
         final sessionId = ((envelope['result'] as Map)['value'] as Map)['sessionId'] as String;
         if (kind == 'approval') {
@@ -392,6 +421,15 @@ class FakeDshHost {
     if (req.method == 'POST' && path == '/api/skill.list') {
       final body = await utf8.decoder.bind(req).join();
       final envelope = jsonDecode(body) as Map<String, dynamic>;
+      // 实测 rc.6 活体主机:skill.list 按 sessionId 寻址(从会话头解析项目
+      // 根目录);缺参直接 bad-request —— 假主机锁同一契约。
+      final payload = envelope['payload'];
+      if (payload is! Map<String, dynamic> ||
+          payload['sessionId'] is! String) {
+        await _bizError(
+            req, envelope['rpcId'] as String, 'bad-request', const {});
+        return;
+      }
       await _ok(req, envelope['rpcId'] as String, {
         'skills': [
           {
@@ -414,6 +452,18 @@ class FakeDshHost {
       sockets.add(ws);
       (path.endsWith('mux') ? muxSockets : hostSockets).add(ws);
       ws.listen((_) {}, onDone: () => sockets.remove(ws));
+      if (path.endsWith('mux')) {
+        // 基线重放(真 host 语义:mux 队列打开时重放 still-pending 的
+        // requested 帧,rpcId 逐字复用;已 resolved 的不在重放集)。
+        for (final entry in replayable.entries) {
+          ws.add(jsonEncode({
+            'type': 'server-request',
+            'rpcId': entry.key,
+            'method': entry.value['type'],
+            'payload': entry.value,
+          }));
+        }
+      }
       return;
     }
     req.response.statusCode = 404;
@@ -463,13 +513,14 @@ class FakeDshHost {
     String? reason,
   }) {
     pendingRespondable[rpcId] = 'approval';
-    sendMuxFrame(<String, dynamic>{
+    replayable[rpcId] = <String, dynamic>{
       'type': 'approval/requested',
       'sessionId': sessionId,
       'approvalId': approvalId,
       'toolName': toolName,
       if (reason != null) 'reason': reason,
-    }, rpcId: rpcId);
+    };
+    sendMuxFrame(replayable[rpcId]!, rpcId: rpcId);
   }
 
   /// 推一条可应答问答卷帧。
@@ -479,11 +530,47 @@ class FakeDshHost {
     required List<Map<String, dynamic>> questions,
   }) {
     pendingRespondable[rpcId] = 'question';
-    sendMuxFrame(<String, dynamic>{
+    replayable[rpcId] = <String, dynamic>{
       'type': 'question/requested',
       'sessionId': sessionId,
       'questions': questions,
-    }, rpcId: rpcId);
+    };
+    sendMuxFrame(replayable[rpcId]!, rpcId: rpcId);
+  }
+
+  /// 模拟「另一端(web 客户端)已回答」:移除待应答/重放登记并 broadcast
+  /// resolved 帧。断线窗口场景(手机没收到帧)由调用方控制时序:先
+  /// unplugMux 再调,帧自然发不出去;host 侧状态已 settled。
+  void resolveApprovalExternally({
+    required String rpcId,
+    required String sessionId,
+    required String approvalId,
+    String outcome = 'allowed-once',
+  }) {
+    pendingRespondable.remove(rpcId);
+    replayable.remove(rpcId);
+    sendMuxFrame(<String, dynamic>{
+      'type': 'approval/resolved',
+      'sessionId': sessionId,
+      'approvalId': approvalId,
+      'outcome': outcome,
+    });
+  }
+
+  /// 同上,question 版。
+  void resolveQuestionExternally({
+    required String rpcId,
+    required String sessionId,
+    String outcome = 'answered',
+  }) {
+    pendingRespondable.remove(rpcId);
+    replayable.remove(rpcId);
+    sendMuxFrame(<String, dynamic>{
+      'type': 'question/resolved',
+      'sessionId': sessionId,
+      'questionRpcId': rpcId,
+      'outcome': outcome,
+    });
   }
 
   /// 推队列快照帧(同时登记内部状态,updateQueue 在其上 splice)。
@@ -503,6 +590,22 @@ class FakeDshHost {
       'type': 'session/event',
       'sessionId': sessionId,
       'event': event,
+    });
+  }
+
+  /// 推 mux session/projection 帧(title 等键;value 为整值,如纯字符串)。
+  void pushProjectionFrame({
+    required String sessionId,
+    required String key,
+    required Object value,
+    required int seq,
+  }) {
+    sendMuxFrame({
+      'type': 'session/projection',
+      'sessionId': sessionId,
+      'key': key,
+      'value': value,
+      'seq': seq,
     });
   }
 

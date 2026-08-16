@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "模块描述"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DshAPP"
+    },
+    {
+      "name": "camera_permission_reason",
+      "value": "用于扫描配对二维码以连接你的电脑(宿主);不会用于拍照或录像。"
+    }
+  ]
+}

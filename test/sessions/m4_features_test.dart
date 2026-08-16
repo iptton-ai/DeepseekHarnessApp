@@ -96,8 +96,8 @@ void main() {
     // 假主机 trim 规范化。
     expect(value.title, '我的新标题');
     final log = store.logFor('session-s1');
-    expect(log.projections['title'], isA<Map>());
-    expect((log.projections['title'] as Map)['title'], '我的新标题');
+    // title 投影值是纯字符串(rc.6 wire 契约,非嵌套 map)。
+    expect(log.projections['title'], '我的新标题');
     expect(log.projectionWatermark, 999);
   });
 

@@ -1,4 +1,4 @@
-package com.example.singleman
+package io.github.iptton.dshapp
 
 import io.flutter.embedding.android.FlutterActivity
 

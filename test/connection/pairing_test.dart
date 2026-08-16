@@ -117,6 +117,8 @@ void main() {
         await client.pairConfirm(session, waiting.offers.single);
     expect(success.token, 'jwt-from-pair');
     expect(success.baseUri, base());
+    // 来源机器名回显(设置页「已连接 xxx」种子)。
+    expect(success.hostLabel, 'mac-mini');
   });
 
   test('start regenerates code on 409 (squat defense, client side)', () async {
@@ -163,6 +165,51 @@ void main() {
       client.pairConfirm(session, wrongOffer),
       throwsA(isA<PairingFailure>()),
     );
+  });
+
+  group('parsePairInvite', () {
+    test('landing page URL with code/host/label', () {
+      final inv = parsePairInvite(
+          'https://dsh.example.com/pair#c=ABCDEFGHJK&h=ABC234&l=mac-mini');
+      expect(inv, isNotNull);
+      expect(inv!.baseUri, Uri.parse('https://dsh.example.com'));
+      expect(inv.code, 'ABCDEFGHJK');
+      expect(inv.hostCode, 'ABC234');
+      expect(inv.label, 'mac-mini');
+      expect(inv.displayCode, 'ABCDE-FGHJK');
+    });
+
+    test('label is sanitized and clamped', () {
+      final inv = parsePairInvite(
+          'https://dsh.example.com/pair#c=ABCDEFGHJK&h=ABC234&l=a%2Fb%3Fc');
+      expect(inv!.label, isNot(contains('/')));
+    });
+
+    test('bare code with fallback base', () {
+      final inv = parsePairInvite('abcde-fghjk',
+          fallbackBase: Uri.parse('https://dsh.example.com'));
+      expect(inv!.code, 'ABCDEFGHJK');
+      expect(inv.hostCode, isNull);
+    });
+
+    test('bare code without fallback base is rejected', () {
+      expect(parsePairInvite('ABCDEFGHJK'), isNull);
+    });
+
+    test('invalid inputs return null', () {
+      expect(parsePairInvite(''), isNull);
+      expect(parsePairInvite('https://dsh.example.com/pair#c=ABC'), isNull);
+      expect(parsePairInvite('https://dsh.example.com/pair#c=ABCDEFGHIJ'), isNull); // 含 I
+      expect(parsePairInvite('https://dsh.example.com/pair#c=ABCDEFGHJ0'), isNull); // 含 0
+      expect(parsePairInvite('http://'), isNull);
+    });
+  });
+
+  test('pairStart with external invite code uses it verbatim', () async {
+    final session = await client.pairStart(base(),
+        device: 'Pixel', code: 'ABCDE-FGHJK');
+    expect(session.code, 'ABCDEFGHJK');
+    expect(pendingCode, 'ABCDEFGHJK');
   });
 
   test('code generation: charset and length', () {

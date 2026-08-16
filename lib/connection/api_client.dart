@@ -81,15 +81,38 @@ class ApiClient {
     headers.forEach(req.headers.set);
   }
 
-  /// 单方法调用:信封 wrap → POST → 信封 unwrap → 业务 parse/折叠。
+  /// 单方法调用(对象 value 形态):信封 wrap → POST → 信封 unwrap → 业务
+  /// parse/折叠。
   ///
-  /// [parse] 收到的是 result.value 的 JSON(空 value 兜底为空 map);
+  /// [parse] 收到的是 result.value 的 JSON;value 非对象(数组/缺省)时兜底为
+  /// 空 map —— 数组 value 的端点(commands/list 等)必须走 [callValue],
+  /// 否则数组会被这里吞成空 map。
   /// 业务错误抛 [RpcBusinessError],载波问题抛 [CarrierError],
   /// 超时抛 [ApiTimeout]。
   Future<T> call<T>(
     String method,
     Map<String, dynamic> payload, {
     required T Function(Map<String, dynamic> json) parse,
+    Duration? timeout,
+  }) {
+    return callValue<T>(
+      method,
+      payload,
+      timeout: timeout,
+      parse: (dynamic value) =>
+          parse(value is Map<String, dynamic> ? value : <String, dynamic>{}),
+    );
+  }
+
+  /// 单方法调用(裸 value 形态):parse 收到原始 result.value(dynamic:
+  /// 对象/数组/标量/缺省 null 均原样透传)。
+  ///
+  /// 真实 wire 里 typert 直连端点(commands/list)的 value 是裸数组,
+  /// [call] 的对象兜底会把它吞掉 —— 那类端点专用本方法。
+  Future<T> callValue<T>(
+    String method,
+    Map<String, dynamic> payload, {
+    required T Function(dynamic value) parse,
     Duration? timeout,
   }) async {
     final limit = timeout ?? _defaultTimeout;
@@ -112,11 +135,54 @@ class ApiClient {
     }
   }
 
+  /// 非 wire 路径的 GET(如 dsh-mobile plugin 的 /pair/api/host):
+  /// 鉴权头照注,任意路径;错误折叠与 call 一致(CarrierError/ApiTimeout)。
+  Future<Map<String, dynamic>> getJson(String path, {Duration? timeout}) async {
+    final limit = timeout ?? _defaultTimeout;
+    try {
+      final uri = _baseUri.replace(path: path);
+      final HttpClientRequest req;
+      try {
+        req = await _httpClient.getUrl(uri);
+      } on SocketException catch (e) {
+        throw CarrierError('connect refused: ${e.message}');
+      }
+      _applyAuth(req);
+      final res = await req.close().timeout(
+        limit,
+        onTimeout: () => throw ApiTimeout('GET $path', limit),
+      );
+      final body = await res.transform(utf8.decoder).join();
+      if (res.statusCode != 200) {
+        throw CarrierError('http ' + res.statusCode.toString(),
+            httpStatus: res.statusCode);
+      }
+      final dynamic decoded;
+      try {
+        decoded = jsonDecode(body);
+      } on FormatException catch (e) {
+        throw CarrierError('non-json body: ${e.message}');
+      }
+      if (decoded is! Map<String, dynamic>) {
+        throw const CarrierError('body not an object');
+      }
+      return decoded;
+    } on ApiTimeout {
+      rethrow;
+    } on CarrierError {
+      rethrow;
+    } on SocketException catch (e) {
+      throw CarrierError('socket: ${e.message}');
+    } on FormatException catch (e) {
+      throw CarrierError('malformed response: ${e.message}');
+    }
+  }
+
   Future<T> _roundTrip<T>(
     String method,
     Map<String, dynamic> payload,
     String rpcId,
-    T Function(Map<String, dynamic> json) parse,
+    T Function(dynamic value) parse,
   ) async {
     final uri = _baseUri.replace(path: '/api/' + method);
     final HttpClientRequest req;
@@ -165,8 +231,7 @@ class ApiClient {
       throw CarrierError('result not an object');
     }
     if (result['ok'] == true) {
-      final value = result['value'];
-      return parse(value is Map<String, dynamic> ? value : <String, dynamic>{});
+      return parse(result['value']);
     }
     final errorJson = result['error'];
     if (errorJson is! Map<String, dynamic>) {

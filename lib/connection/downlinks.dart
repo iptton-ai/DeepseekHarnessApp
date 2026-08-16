@@ -6,15 +6,18 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'dart:io';
-
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 单条下行连接:打开后只收帧;done 在对端关闭/出错时完成。
 class Downlink {
   Downlink._(this.name, this._ws) {
-    _frames = StreamController<Map<String, dynamic>>.broadcast();
+    // 单订阅 controller(非 broadcast):open 与首次 listen 之间到达的帧
+    // 进入缓冲而非丢弃。真 host 在 mux open 的瞬间同步推基线重放帧
+    // (still-pending 审批/问答 + 队列/任务快照,api-proxy events.mux 处理器
+    // 一次推完),而本客户端要等 describe+双 WS 三路握手全成才 adopt 挂
+    // 监听 —— broadcast 无监听者会静默丢帧,重连后交互卡丢失即此竞态。
+    _frames = StreamController<Map<String, dynamic>>();
     _doneCompleter = Completer<void>();
     _subscription = _ws.listen(
       (data) {
@@ -22,7 +25,9 @@ class Downlink {
         try {
           decoded = jsonDecode(data as String);
         } on FormatException catch (e) {
-          _frames.addError(CarrierError('non-json frame on ' + name + ': ' + e.message));
+          _frames.addError(
+            CarrierError('non-json frame on ' + name + ': ' + e.message),
+          );
           return;
         }
         if (decoded is Map<String, dynamic>) {
@@ -56,8 +61,11 @@ class Downlink {
     HttpClient? customClient,
     Map<String, String> headers = const {},
   }) async {
-    final ws = await WebSocket.connect(uri.toString(),
-        headers: headers, customClient: customClient);
+    final ws = await WebSocket.connect(
+      uri.toString(),
+      headers: headers,
+      customClient: customClient,
+    );
     return Downlink._(name, ws);
   }
 
@@ -86,6 +94,10 @@ class Downlink {
       // 对端已断开时 close 可能抛错;忽略。
     }
     _completeDone();
+    if (!_frames.isClosed) {
+      // 未被 adopt 的 Downlink(握手失败路径):丢弃缓冲帧并释放。
+      await _frames.close();
+    }
   }
 }
 
@@ -103,8 +115,11 @@ class DownlinkParser {
     try {
       final envelope = RpcMessage.fromJson(raw);
       if (envelope is! RpcMessageServerRequest) {
-        onError(CarrierError(
-            'downlink envelope is ' + envelope.runtimeType.toString()));
+        onError(
+          CarrierError(
+            'downlink envelope is ' + envelope.runtimeType.toString(),
+          ),
+        );
         return null;
       }
       final payload = envelope.payload;

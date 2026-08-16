@@ -77,7 +77,9 @@ Future<void> _open(
               context,
               sessionId: 'session-s1',
               store: store,
-              onPick: picked.add,
+              // onPick 现在给整条 item(command/skill 类型可判);
+              // 这里记录派发行文本,与旧契约等价。
+              onPick: (item) => picked.add(item.slash),
             ),
             child: const Text('open'),
           ),

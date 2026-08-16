@@ -2,7 +2,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:singleman/connection/api_client.dart';
 import 'package:singleman/sessions/goal_store.dart';
-import 'package:singleman/wire/generated/wire_generated.dart';
 
 import '../helpers/fake_dsh_host.dart';
 
@@ -40,13 +39,14 @@ void main() {
   });
 
   test('skill.list caches; promptFor builds slash command text', () async {
-    final list = await skills.list();
+    // skill.list 按 sessionId 寻址(实测 rc.6:缺参 bad-request)。
+    final list = await skills.list('session-s1');
     expect(list, hasLength(2));
     expect(list.first.name, 'deploy');
     expect(list.first.whenToUse, isNotNull);
     expect(list.last.modelInvocable, isFalse);
     // 缓存:第二次不再打网络(无新请求即返回同实例)。
-    final again = await skills.list();
+    final again = await skills.list('session-s1');
     expect(again, same(list));
     // 斜杠命令文本。
     expect(skills.promptFor('deploy'), '/deploy');

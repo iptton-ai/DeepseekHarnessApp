@@ -3,7 +3,7 @@
 // 本文件带 path_provider(Flutter 插件),只允许 main.dart 引用 ——
 // bin/ 冒烟脚本不得引入(纪律见 credentials.dart 头注)。
 // 密码永不落盘,只存网关设备令牌(30 天,可吊销)。
-import 'dart:convert';
+// 形状 v2 = 主机簿(hosts + active,方案 A 多主机);旧单对象读入自动迁移。
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
@@ -17,7 +17,7 @@ class FileCredentialStore implements CredentialStore {
   Future<File> _file() async {
     if (_resolved != null) return _resolved!;
     if (_overridePath != null) {
-      _resolved = File(_overridePath!);
+      _resolved = File(_overridePath);
     } else {
       final dir = await _resolveDir();
       _resolved = File('${dir.path}/credentials.json');
@@ -44,44 +44,27 @@ class FileCredentialStore implements CredentialStore {
   }
 
   @override
-  Future<StoredCredentials?> load() async {
+  Future<HostBook> load() async {
     try {
       final f = await _file();
-      if (!await f.exists()) return null;
-      final raw = jsonDecode(await f.readAsString());
-      if (raw is! Map<String, dynamic>) return null;
-      final baseStr = raw['baseUri'];
-      if (baseStr is! String) return null;
-      final base = Uri.tryParse(baseStr);
-      if (base == null || !base.hasScheme || base.host.isEmpty) return null;
-      final token = raw['token'];
-      return StoredCredentials(
-        baseUri: base,
-        token: token is String && token.isNotEmpty ? token : null,
-      );
+      if (!await f.exists()) return const HostBook();
+      final parsed = parseHostBookJson(await f.readAsString());
+      // 任何读失败(损坏/权限)都视作空簿 —— 走重新登录,不崩。
+      return parsed ?? const HostBook();
     } on Object {
-      // 任何读失败(损坏/权限)都视作无凭证 —— 走重新登录,不崩。
-      return null;
+      return const HostBook();
     }
   }
 
   @override
-  Future<void> save(StoredCredentials credentials) async {
+  Future<void> save(HostBook book) async {
     try {
       final f = await _file();
-      await f.writeAsString(encodeCredentialsJson(credentials));
+      await f.writeAsString(encodeHostBookJson(book));
       // dart:io 无 chmod API;目录在应用沙箱内(移动端)/单用户目录(桌面),
       // 敏感性由令牌可吊销兜底。
     } on Object {
       // 持久化失败不阻断登录流程(下次启动重登)。
     }
-  }
-
-  @override
-  Future<void> clear() async {
-    try {
-      final f = await _file();
-      if (await f.exists()) await f.delete();
-    } on Object {}
   }
 }

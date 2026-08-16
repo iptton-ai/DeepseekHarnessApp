@@ -1,7 +1,6 @@
 // 冒烟:app 入口组装(SinglemanApp + ChatScreen)可构建。
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:singleman/main.dart';
 import 'package:singleman/sessions/session_store.dart';
@@ -21,6 +20,9 @@ class _EmptyView implements SessionStoreView {
 
   @override
   Future<void> loadOlder(String sessionId) async {}
+
+  @override
+  Future<String> fork(String sessionId, {int? atSeq}) async => 'forked';
 }
 
 void main() {
@@ -28,7 +30,7 @@ void main() {
     final vm = ChatViewModel(store: _EmptyView(), connection: null);
     await tester.pumpWidget(SinglemanApp(
       vm: vm,
-      onNewSession: () async {},
+      onNewSession: (_) async {},
       sender: (id, text) async {},
     ));
     await tester.pump(const Duration(milliseconds: 50));

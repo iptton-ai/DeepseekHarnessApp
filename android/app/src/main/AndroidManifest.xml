@@ -1,9 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- M6:远程网关连接(https/wss)必需;debug 模板只在 debug manifest 提供 -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- M6.2:配对页扫 dsh web 的二维码(mobile_scanner) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
-        android:label="singleman"
+        android:label="DshAPP"
         android:name="${applicationName}"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
