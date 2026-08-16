@@ -437,6 +437,19 @@ void main() {
           '加载目录超时');
     });
 
+    test('错误消息映射:directory-picker-unavailable(host 以 native 启动)', () {
+      // 服务端 message 是英文开发向文案,客户端换自己的可读话术,不透传。
+      final picker = RpcBusinessError(RpcErrorDirectoryPickerUnavailable(
+          message: 'host.listDirectory needs the browse capability',
+          details: const <String, dynamic>{'capability': 'native'}));
+      expect(directoryListErrorMessage(picker),
+          '宿主为原生选择器模式,无法远程浏览目录');
+      expect(directoryListErrorMessage(picker, path: '/x'),
+          '无法读取「/x」: 宿主为原生选择器模式,无法远程浏览目录');
+      expect(
+          directoryCreateErrorMessage(picker), '宿主为原生选择器模式,无法远程操作目录');
+    });
+
     test('广播流:list 成功/失败/开关各推快照', () async {
       final emissions = <DirectoryBrowserSnapshot>[];
       final sub = store.snapshots.listen(emissions.add);

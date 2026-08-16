@@ -253,6 +253,10 @@ String directoryListErrorMessage(Object error, {String? path}) {
   final base = switch (code) {
     RpcErrorDirectoryUnreadable(:final message) =>
         _nonEmpty(message, '该目录不可读(无权限或不是文件夹)'),
+    // host 以 native picker 启动(桌面形态默认):browse RPC 被整体拒绝,
+    // 不是路径问题 —— 服务端 message 是英文开发向文案,不透传。
+    RpcErrorDirectoryPickerUnavailable() =>
+        '宿主为原生选择器模式,无法远程浏览目录',
     RpcErrorBadRequest(:final message) => _nonEmpty(message, '路径无效'),
     null => _carrierMessage(error),
     _ => _nonEmpty(_errorMessageOf(code), '加载目录失败'),
@@ -269,6 +273,8 @@ String directoryCreateErrorMessage(Object error) {
         _nonEmpty(message, '已存在同名文件夹'),
     RpcErrorDirectoryCreateFailed(:final message) =>
         _nonEmpty(message, '创建文件夹失败'),
+    RpcErrorDirectoryPickerUnavailable() =>
+        '宿主为原生选择器模式,无法远程操作目录',
     RpcErrorBadRequest(:final message) => _nonEmpty(message, '文件夹名称无效'),
     null => _carrierMessage(error),
     _ => _nonEmpty(_errorMessageOf(code), '创建文件夹失败'),
