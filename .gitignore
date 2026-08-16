@@ -46,3 +46,23 @@ app.*.map.json
 
 # 服务端本地资料(含真实服务器地址/运维细节,不入库;见 server/LOCAL.md)
 /server/
+
+# 维护者本地文档(结论/过程日志,均不入库)
+/PROGRESS.md
+/AGENTS.md
+
+# 华为发布通道:本地发布工具链整目录不入库(Fastfile 含本机绝对路径,
+# fastlane eval 下 __dir__ 不可靠故硬编码;凭证软链同目录)。与 server/ 同哲学
+/fastlane/
+/Gemfile
+/Gemfile.lock
+
+# OHOS 签名配置:DevEco 写入的 storePassword/keyPassword 密文 + 真实密钥路径,
+# 绝不入库(泄漏审计 H-1;fresh clone 由 DevEco 重新生成/手动配置)
+/ohos/build-profile.json5
+
+# 上架物料(AGC 文案含真实域名/截图,本地维护;入库前需占位符化)
+/docs/store/
+
+# 本地备份文件
+*.backup

@@ -23,6 +23,8 @@ void main() {
     '101.35.' + '129.159',
     '/Users/' + 'zxnap',
     'dshgw-' + 'password',
+    // CF 形态网关域名族(zone pan2017.cn);2026-08-16 泄漏审计补
+    'pan' + '2017',
   ];
   // 防自伤自检:模式若被批量替换腐化成占位符本身,必须炸,不许静默通过。
   final neutralized = {'dsh.' + 'example' + '.com', 'example' + '.com'};
@@ -38,6 +40,7 @@ void main() {
     '.dart', '.md', '.sh', '.yaml', '.yml', '.json', '.mjs', '.plist',
     '.kts', '.gradle', '.properties', '.xml', '.swift', '.entitlements',
     '.lock', '.pbxproj', '.xcscheme', '.xcconfig', '.txt',
+    '.json5', '.jsonl', // OHOS 配置(签名材料)与 ws 抓包帧;2026-08-16 审计补
     '', // LICENSE 等无扩展名文件
   };
 
