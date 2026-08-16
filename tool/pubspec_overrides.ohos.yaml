@@ -1,0 +1,14 @@
+# OHOS 构建专用依赖覆盖模板(由 tool/ohos_deps.sh on 复制到仓库根生效)。
+# pub.dev 的 mobile_scanner 无 ohos 实现;此文件将其切换到 CPF-Flutter fork
+# (br_v7.1.4_ohos,基于上游 7.1.4,只增 ohos 平台实现)。
+# ⚠️ fork 的 android/ Kotlin 源在该 ref 下编译必炸(Unresolved reference 连锁,
+#    Android release 构建即栽在这),因此这份 override 只允许在 OHOS 构建时启用,
+#    Android/iOS/桌面一律走 pub.dev 原版(默认态,文件不存在)。
+# path_provider 的 OHOS fork override 常驻 pubspec.yaml(同版本号最小 diff,
+#    对其余平台无害),此处不重复声明。
+dependency_overrides:
+  mobile_scanner:
+    git:
+      url: https://gitcode.com/CPF-Flutter/fluttertpc_mobile_scanner.git
+      # ref 钉死分支头 commit(=pubspec.lock resolved-ref),防分支漂移(供应链审计同策略)
+      ref: f5a4ff52f003e1645db1d4de743a2db0313665a8 # br_v7.1.4_ohos 分支头

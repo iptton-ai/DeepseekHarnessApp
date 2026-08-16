@@ -55,6 +55,11 @@ dev_dependencies:
 # br_path_provider-v2.1.5_ohos 同版本号(2.1.5)只增一个 ohos default_package
 # 声明,传递解析 path_provider_ohos(openharmony-sig 同分支,MethodChannel 端到端)。
 # 其余平台语义不变;ohos 构建由 OHOS fork SDK flutter build hap 驱动。
+#
+# mobile_scanner 的 OHOS fork override 不在此常驻 —— fork 的 android/ Kotlin 源
+# 在钉死 ref 下编译必炸(Unresolved reference 连锁,Android release 构建即栽在这)。
+# 改为按平台切换:OHOS 构建前 ./tool/ohos_deps.sh on(生成 gitignored 的
+# pubspec_overrides.yaml),完成后 ./tool/ohos_deps.sh off 还原 pub.dev 原版。
 dependency_overrides:
   path_provider:
     git:
@@ -62,14 +67,6 @@ dependency_overrides:
       path: packages/path_provider/path_provider
       # ref 钉死分支头 commit(=pubspec.lock resolved-ref),防分支漂移(2026-08-16 供应链审计)
       ref: 7cc9f4cfbd464943096dc7c87288252c543df5cb # br_path_provider-v2.1.5_ohos
-  
-  # OHOS 扫码包支持 (CPF-Flutter fork, 分支 br_v7.1.4_ohos)
-  # 对应 Flutter 3.35.x-ohos，版本 7.1.4 (pub.dev 7.4.0 的 OHOS 移植版)
-  # 见: https://gitcode.com/CPF-Flutter/fluttertpc_mobile_scanner#br_v7.1.4_ohos
-  mobile_scanner:
-    git:
-      url: https://gitcode.com/CPF-Flutter/fluttertpc_mobile_scanner.git
-      ref: f5a4ff52f003e1645db1d4de743a2db0313665a8 # br_v7.1.4_ohos 分支头
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
