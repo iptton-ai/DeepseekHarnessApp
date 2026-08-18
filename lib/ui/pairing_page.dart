@@ -283,6 +283,7 @@ class _PairingPageState extends State<PairingPage> {
   }
 
   Widget _buildUrlStep(ColorScheme scheme) {
+    final hasScanner = _hasQrScannerSupport();
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -290,26 +291,45 @@ class _PairingPageState extends State<PairingPage> {
         Icon(Icons.phonelink_ring_outlined, size: 44, color: scheme.primary),
         const SizedBox(height: 10),
         Text(
-          '与运行 DSH 的电脑配对\nMac 上 dsh web「移动接入」页可输入配对码(兜底:终端 pair.sh)',
+          '与运行 DSH 的电脑配对,两种方式任选其一',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall,
         ),
-        const SizedBox(height: 22),
+        const SizedBox(height: 20),
+        // 方式一(推荐):扫码/粘贴邀请。二维码/邀请自带网关地址,发起时
+        // 会覆盖手填地址(防「手机等 A 网关、Mac 去 B 网关应约」的错位),
+        // 故与手动输入分区展示,避免「扫了码却以为在用手填地址」的误解。
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _scanOrPaste,
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(48),
+          ),
+          icon: Icon(hasScanner ? Icons.qr_code_scanner : Icons.content_paste),
+          label: Text(hasScanner ? '扫码配对(推荐)' : '粘贴邀请配对(推荐)'),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            hasScanner
+                ? '扫 Mac「移动接入」窗口的二维码 —— 网关地址由二维码自带,不会用到下方手填的地址'
+                : '粘贴 Mac「移动接入」窗口复制的邀请链接 —— 网关地址由邀请自带,不会用到下方手填的地址',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        const SizedBox(height: 20),
+        Text('或 手动配对', style: Theme.of(context).textTheme.bodySmall),
+        const SizedBox(height: 8),
         TextField(
           controller: _url,
           enabled: !_busy,
           autocorrect: false,
           keyboardType: TextInputType.url,
-          decoration: InputDecoration(
-            labelText: '网关地址',
+          decoration: const InputDecoration(
+            labelText: '网关地址(手动配对用)',
             hintText: 'https://dsh.example.com',
-            suffixIcon: Tooltip(
-              message: _hasQrScannerSupport() ? '扫码配对' : '从剪贴板粘贴邀请',
-              child: IconButton(
-                icon: Icon(_hasQrScannerSupport() ? Icons.qr_code_scanner : Icons.content_paste),
-                onPressed: _busy ? null : _scanOrPaste,
-              ),
-            ),
+            helperText: '填网关地址 → 生成配对码 → 输入 Mac「移动接入」窗口;粘贴裸 10 位码也按此地址发起',
+            helperMaxLines: 2,
           ),
         ),
         const SizedBox(height: 18),
@@ -391,7 +411,7 @@ class _PairingPageState extends State<PairingPage> {
         Text(
           _inviteLabel.isEmpty
               ? '把这个码输入 Mac 的 dsh web「移动接入」页(或终端 pair.sh):'
-              : '来自 $_inviteLabel 的扫码邀请已就绪;Mac 侧会自动应约:',
+              : '来自 $_inviteLabel 的扫码邀请已就绪(网关 ${session.baseUri.authority});Mac 侧会自动应约:',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall,
         ),

@@ -224,7 +224,7 @@ void main() {
     RemoteLoginSuccess? received;
 
     await pumpPage(tester, pairing: pairing, onDone: (s) async => received = s);
-    await tester.tap(find.byIcon(Icons.qr_code_scanner));
+    await tester.tap(find.text('粘贴邀请配对(推荐)'));
     await tester.pump();
 
     // 邀请码发起(fake 首个轮询即返回 offers,等待页会被立即推进)。
@@ -268,7 +268,7 @@ void main() {
     ]);
 
     await pumpPage(tester, pairing: pairing, onDone: (_) async {});
-    await tester.tap(find.byIcon(Icons.qr_code_scanner));
+    await tester.tap(find.text('粘贴邀请配对(推荐)'));
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
     await tester.pump(const Duration(milliseconds: 100));
@@ -293,7 +293,7 @@ void main() {
       PairPollResult(status: PairPollStatus.waiting, offers: []),
     ]);
     await pumpPage(tester, pairing: pairing, onDone: (_) async {});
-    await tester.tap(find.byIcon(Icons.qr_code_scanner));
+    await tester.tap(find.text('粘贴邀请配对(推荐)'));
     await tester.pump();
     expect(find.textContaining('不是有效的配对邀请'), findsOneWidget);
     expect(pairing.startCalls, 0);
