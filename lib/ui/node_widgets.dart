@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/event_nodes.dart';
 import 'package:singleman/ui/attachment_views.dart';
+import 'package:singleman/ui/deliverables_row.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 常显触控高度下限(移动可用性硬性要求)。
@@ -35,6 +36,7 @@ class ChatNodeList extends StatefulWidget {
     this.sessionId,
     this.attachmentFetcher,
     this.onFork,
+    this.onOpenSubagent,
   });
   final List<ChatNode> nodes;
 
@@ -45,6 +47,9 @@ class ChatNodeList extends StatefulWidget {
   /// 消息操作区「分叉」回调(对齐 web MessageIconActions 的 branch):
   /// 参数 = 锚定消息 seq;缺席时分叉按钮不渲染(复制按钮始终可用)。
   final void Function(int seq)? onFork;
+
+  /// workflow 运行卡成员行点击 → 打开对应子会话 transcript(A7/A10 联动)。
+  final void Function(String childSessionId)? onOpenSubagent;
   final EdgeInsetsGeometry? padding;
 
   @override
@@ -219,6 +224,8 @@ class _ChatNodeListState extends State<ChatNodeList> {
           child: ListView.builder(
             controller: _controller,
             padding: widget.padding ?? const EdgeInsets.fromLTRB(12, 12, 12, 18),
+            // 拖动列表即收键盘(iOS 标准交互;键盘挡屏实报)。
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             itemCount: widget.nodes.length,
             itemBuilder: (context, i) {
               final node = widget.nodes[i];
@@ -265,6 +272,8 @@ class _ChatNodeListState extends State<ChatNodeList> {
         images: node.images,
         sessionId: sid,
         fetcher: fetcher,
+        steering: node.steering,
+        time: node.time,
       ),
       ChatNodeAssistant() => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -277,14 +286,20 @@ class _ChatNodeListState extends State<ChatNodeList> {
             streaming: node.streaming,
           ),
           // 消息操作区(对齐 web MessageIconActions):定稿后常显
-          // 复制 + 分叉。反馈(👍/👎/备注)已移除 —— web 侧该功能走
-          // 可选插件 slot(assistant-actions),本机 web 未装,客户端
-          // 不应单方面出现 web 没有的 UI。
+          // 复制 + 分叉 + 时间戳(A2:web clock 语义的移动常显版)。
+          // 反馈(👍/👎)不渲染 —— 2026-08-17 活体复验:本机 rc.6 web
+          // bundle 不含 ui-message-feedback(master 默认装配才有),按
+          // 「web 用户看不到的 Flutter 不多显示」保持不接线(RENDER-
+          // PARITY-PLAN Q1 结论;升级 rc.7+ 后重验再挂 FeedbackActions)。
           if (!node.streaming)
             _AssistantActions(
               text: node.text,
               seq: node.seq,
               onFork: widget.onFork,
+              time: node.time,
+              runMs: node.runMs,
+              ttftMs: node.ttftMs,
+              tokensPerSecond: node.tokensPerSecond,
             ),
         ],
       ),
@@ -292,6 +307,16 @@ class _ChatNodeListState extends State<ChatNodeList> {
       ChatNodeTool() => _ToolCard(node: node),
       ChatNodeTodo() => _TodoCard(node: node),
       ChatNodeCompaction() => _CompactionRow(node: node),
+      ChatNodeContextRow() => _ContextRow(node: node),
+      ChatNodeCommand() => _CommandCard(node: node),
+      ChatNodeWorkflowRun() => _WorkflowRunCard(
+        node: node,
+        onOpenChild: widget.onOpenSubagent,
+      ),
+      ChatNodeDeliverables() => Padding(
+        padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
+        child: ProducedFilesRow(paths: node.paths),
+      ),
       ChatNodeRetry() => _InlineNotice(
         icon: Icons.refresh,
         text: _retryText(node),
@@ -309,17 +334,22 @@ class _ChatNodeListState extends State<ChatNodeList> {
 }
 
 /// 用户气泡:右对齐,全文不截断,文本可选中复制。
+/// [steering] = 运行中被接纳的插话(A6):头部「插话」徽标。
 class _UserBubble extends StatelessWidget {
   const _UserBubble({
     required this.text,
     this.images,
     this.sessionId,
     this.fetcher,
+    this.steering = false,
+    this.time,
   });
   final String text;
   final List<ImageAttachmentRef>? images;
   final String? sessionId;
   final AttachmentFetchView? fetcher;
+  final bool steering;
+  final double? time;
 
   @override
   Widget build(BuildContext context) {
@@ -350,6 +380,30 @@ class _UserBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
+            if (steering)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.alt_route_rounded,
+                      size: 12,
+                      color: colors.primary,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      '插话',
+                      key: const ValueKey('steering-badge'),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: colors.primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (text.isNotEmpty)
               SelectableText(
                 text,
@@ -364,6 +418,18 @@ class _UserBubble extends StatelessWidget {
                 refs: images!,
                 fetcher: fetcher!,
                 alignment: WrapAlignment.end,
+              ),
+            if (time != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Text(
+                  formatNodeTime(time!),
+                  key: const ValueKey('user-time'),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: colors.onPrimaryContainer.withValues(alpha: .6),
+                  ),
+                ),
               ),
           ],
         ),
@@ -555,11 +621,27 @@ class _TypingDots extends StatelessWidget {
 /// 缺回调时不渲染分叉)。常显(移动纪律:hover-only 改常显);
 /// 触控目标 ≥44dp 由 IconButton visualDensity 补足。
 class _AssistantActions extends StatefulWidget {
-  const _AssistantActions({required this.text, required this.seq, this.onFork});
+  const _AssistantActions({
+    required this.text,
+    required this.seq,
+    this.onFork,
+    this.time,
+    this.runMs,
+    this.ttftMs,
+    this.tokensPerSecond,
+  });
 
   final String text;
   final int seq;
   final void Function(int seq)? onFork;
+
+  /// 消息时间戳(A2:web MessageIconActions 的 clock 常显化)。
+  final double? time;
+
+  /// 轮末指标(A2:web「Ran for/TTFT/tok-s」;仅完成轮的最后一条消息携带)。
+  final double? runMs;
+  final double? ttftMs;
+  final double? tokensPerSecond;
 
   @override
   State<_AssistantActions> createState() => _AssistantActionsState();
@@ -578,6 +660,21 @@ class _AssistantActionsState extends State<_AssistantActions> {
     });
   }
 
+  /// 轮末指标文本:Ran for 45.2s · TTFT 800ms · 12.3 tok/s
+  ///(任一缺席即省略对应段;全缺席不渲染本行)。
+  String _metricsText() {
+    final parts = <String>[
+      if (widget.runMs != null) formatDurationMs(widget.runMs!),
+      if (widget.ttftMs != null)
+        'TTFT ${widget.ttftMs!.round()}ms',
+      if (widget.tokensPerSecond != null)
+        widget.tokensPerSecond! >= 100
+            ? '${widget.tokensPerSecond!.round()}/s'
+            : '${(widget.tokensPerSecond! * 10).round() / 10} tok/s',
+    ];
+    return parts.join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -587,6 +684,31 @@ class _AssistantActionsState extends State<_AssistantActions> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (widget.runMs != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Text(
+                _metricsText(),
+                key: const ValueKey('assistant-metrics'),
+                style: TextStyle(
+                  fontSize: 10,
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            ),
+          ] else if (widget.time != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Text(
+                formatNodeTime(widget.time!),
+                key: const ValueKey('assistant-time'),
+                style: TextStyle(
+                  fontSize: 10,
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            ),
+          ],
           IconButton(
             tooltip: _copied ? '已复制' : '复制全文',
             visualDensity: VisualDensity.compact,
@@ -1025,6 +1147,19 @@ class _ToolCardState extends State<_ToolCard> {
                               ),
                             ),
                             const SizedBox(width: 8),
+                            if (toolDurationText(node) != null)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: Text(
+                                  toolDurationText(node)!,
+                                  key: const ValueKey('tool-duration'),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: theme.colorScheme.outline,
+                                    fontFeatures: [FontFeature.tabularFigures()],
+                                  ),
+                                ),
+                              ),
                             _StatusBadge(status: node.status),
                             Icon(
                               _expanded ? Icons.expand_less : Icons.expand_more,
@@ -1579,6 +1714,392 @@ String _retryText(ChatNodeRetry node) {
   final reason = node.reason;
   return reason == null || reason.isEmpty ? head : '$head: $reason';
 }
+
+/// A2/A15 时间格式化:同日 HH:mm,跨日补日期(web use-calendar-day 语义)。
+String formatNodeTime(double epochMs) {
+  final dt = DateTime.fromMillisecondsSinceEpoch(epochMs.round());
+  final now = DateTime.now();
+  final hh = dt.hour.toString().padLeft(2, '0');
+  final mm = dt.minute.toString().padLeft(2, '0');
+  final sameDay =
+      dt.year == now.year && dt.month == now.month && dt.day == now.day;
+  if (sameDay) return '$hh:$mm';
+  return '${dt.month}/${dt.day} $hh:$mm';
+}
+
+/// A4 工具耗时:call→result 墙钟;web formatDuration 同款(45.2s / 2m42s)。
+String? toolDurationText(ChatNodeTool node) {
+  final call = node.callTime;
+  final end = node.resultTime;
+  if (call == null || end == null || end <= call) return null;
+  return formatDurationMs(end - call);
+}
+
+/// web StatsLine.formatDuration 的 Dart 版。
+String formatDurationMs(double ms) {
+  final s = ms / 1000;
+  if (s < 60) return '${(s * 10).round() / 10}s';
+  final whole = s.round();
+  return '${whole ~/ 60}m${whole % 60}s';
+}
+
+/// A5 注入上下文行:左侧低调折叠行(web ContextInjectionRow 对齐)。
+/// 头部 = 「上下文注入/召回」 + 生产者标签;展开显示正文(截断保护)。
+class _ContextRow extends StatefulWidget {
+  const _ContextRow({required this.node});
+  final ChatNodeContextRow node;
+
+  @override
+  State<_ContextRow> createState() => _ContextRowState();
+}
+
+class _ContextRowState extends State<_ContextRow> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final node = widget.node;
+    final title = node.recall ? '上下文召回' : '上下文注入';
+    final label = node.provenanceLabel;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: kNodeTapHeight),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.browse_gallery_outlined,
+                      size: 15,
+                      color: theme.colorScheme.outline,
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      title,
+                      key: const ValueKey('context-row-title'),
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (label != null && label.isNotEmpty) ...[
+                      Text(
+                        ' · ',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: theme.colorScheme.outline,
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ] else
+                      const Spacer(),
+                    if (node.summary != null && node.summary!.isNotEmpty)
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 120),
+                        child: Text(
+                          node.summary!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          key: const ValueKey('context-row-summary'),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: theme.colorScheme.outline,
+                          ),
+                        ),
+                      ),
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 16,
+                      color: theme.colorScheme.outline,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (_expanded && node.text != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+              child: _MonoScroll(text: _capForDisplay(node.text!)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// B1 命令卡(web CommandNode/GenericCommandCard 对齐):/cmd 执行痕迹。
+class _CommandCard extends StatelessWidget {
+  const _CommandCard({required this.node});
+  final ChatNodeCommand node;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final ok = node.done && node.outcomeKind == 'success';
+    final failed = node.done && node.outcomeKind != null && !ok;
+    final color = failed
+        ? theme.colorScheme.error
+        : ok
+             ? Colors.green.shade700
+             : theme.colorScheme.primary;
+    final title = node.name == null ? '命令' : '/${node.name!}';
+    final detail = node.done
+        ? (node.outcomeText ?? (node.outcomeKind ?? ''))
+        : '执行中…';
+    return Container(
+      key: ValueKey('command-card-${node.seq}'),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow.withValues(alpha: .6),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: .35),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            node.done
+                ? (ok ? Icons.check_circle_outline : Icons.error_outline)
+                : Icons.terminal,
+            size: 16,
+            color: color,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              detail.isEmpty ? title : '$title · $detail',
+              key: const ValueKey('command-card-title'),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A7 workflow 运行卡:阶段分组 + 成员状态(web WorkflowRunCard 对齐)。
+/// [onOpenChild] = 点击成员行打开子会话 transcript(A10 联动)。
+class _WorkflowRunCard extends StatelessWidget {
+  const _WorkflowRunCard({required this.node, this.onOpenChild});
+  final ChatNodeWorkflowRun node;
+  final void Function(String childId)? onOpenChild;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = switch (node.status) {
+      'completed' => Colors.green.shade700,
+      'failed' => theme.colorScheme.error,
+      'cancelled' || 'interrupted' => Colors.orange.shade800,
+      _ => theme.colorScheme.primary,
+    };
+    final statusLabel = switch (node.status) {
+      'running' => '运行中',
+      'completed' => '已完成',
+      'failed' => '失败',
+      'cancelled' => '已取消',
+      _ => '已中断',
+    };
+    return Container(
+      key: ValueKey('workflow-card-${node.seq}'),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: .4),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Stack(
+          children: [
+            PositionedDirectional(
+              start: 0,
+              top: 0,
+              bottom: 0,
+              width: 3.5,
+              child: Container(color: color.withValues(alpha: .85)),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(left: 3.5),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: kNodeTapHeight),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          if (node.status == 'running')
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                valueColor: AlwaysStoppedAnimation(color),
+                              ),
+                            )
+                          else
+                            Icon(
+                              Icons.account_tree_outlined,
+                              size: 16,
+                              color: color,
+                            ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '工作流 · ${node.name}',
+                              key: const ValueKey('workflow-card-title'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            statusLabel,
+                            style: TextStyle(fontSize: 11, color: color),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  for (final phase in node.phases) ...[
+                    Divider(
+                      height: 1,
+                      color: theme.colorScheme.outlineVariant.withValues(
+                        alpha: .3,
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+                      child: Text(
+                        phase.phase == null ? '默认阶段' : '阶段 ${phase.phase}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: theme.colorScheme.outline,
+                        ),
+                      ),
+                    ),
+                    for (final m in phase.members)
+                      InkWell(
+                        onTap: onOpenChild == null || m.childId.isEmpty
+                            ? null
+                            : () => onOpenChild!(m.childId),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 5,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                _workflowMemberIcon(m.status),
+                                size: 14,
+                                color: _workflowMemberColor(
+                                  context,
+                                  m.status,
+                                ),
+                              ),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Text(
+                                  m.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                _workflowMemberLabel(m.status),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: _workflowMemberColor(
+                                    context,
+                                    m.status,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                  const SizedBox(height: 6),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+IconData _workflowMemberIcon(String status) => switch (status) {
+      'completed' => Icons.check_circle_outline,
+      'failed' => Icons.error_outline,
+      'cancelled' || 'interrupted' => Icons.remove_circle_outline,
+      _ => Icons.smart_toy_outlined,
+    };
+
+Color _workflowMemberColor(BuildContext context, String status) {
+  final scheme = Theme.of(context).colorScheme;
+  return switch (status) {
+    'completed' => Colors.green.shade700,
+    'failed' => scheme.error,
+    'cancelled' || 'interrupted' => Colors.orange.shade800,
+    _ => scheme.primary,
+  };
+}
+
+String _workflowMemberLabel(String status) => switch (status) {
+      'running' => '运行中',
+      'completed' => '完成',
+      'failed' => '失败',
+      'cancelled' => '取消',
+      _ => '中断',
+    };
 
 class _NoticeRow extends StatelessWidget {
   const _NoticeRow({required this.node});

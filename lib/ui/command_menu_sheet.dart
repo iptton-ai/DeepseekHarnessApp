@@ -5,8 +5,9 @@
 // - 命令组:/name + description + input.hint;skill 组:现有 skill 菜单格式
 //   (图标 auto_awesome/lock_outline + '/name' + description)
 // - 行高 ≥48dp(硬性 ≥44);宽内容单行截断;hover 类交互在移动端降级为常显
-// - 点击 = onPick(CommandMenuItem),由集成方决定派发(命令 → execute,
-//   skill → prompt 文本,DSH-PROTOCOL §5)
+// - 点击 = onPick(CommandMenuItem),由集成方决定派发(web ui-commands
+//   dispatch 决策表:contribution/装饰命令 → 各自交互面;leadingInput 命令 →
+//   回填输入框;裸命令 → execute;skill → 回填 '/name ' 文本,DSH-PROTOCOL §5)
 // - fuzzy:filterMenu(前缀优先 + 子序列,大小写不敏感),简化版
 // - 空目录/加载失败:内联提示 + 重试(搜索词保留)
 // - 键盘弹起时 sheet 上移(MediaQuery.viewInsets)
@@ -24,6 +25,7 @@ Future<void> showCommandMenu(
   required String sessionId,
   required CommandStoreView store,
   required void Function(CommandMenuItem item) onPick,
+  List<CommandMenuItem> extraItems = const <CommandMenuItem>[],
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -33,6 +35,7 @@ Future<void> showCommandMenu(
       sessionId: sessionId,
       store: store,
       onPick: onPick,
+      extraItems: extraItems,
     ),
   );
 }
@@ -42,11 +45,16 @@ class _CommandMenuSheet extends StatefulWidget {
     required this.sessionId,
     required this.store,
     required this.onPick,
+    this.extraItems = const <CommandMenuItem>[],
   });
 
   final String sessionId;
   final CommandStoreView store;
   final void Function(CommandMenuItem item) onPick;
+
+  /// 客户端 contribution 行(web 对齐:如 /model 由客户端注册,非宿主目录),
+  /// 合并进「命令」组;与宿主目录重名的项静默跳过(宿主行优先)。
+  final List<CommandMenuItem> extraItems;
 
   @override
   State<_CommandMenuSheet> createState() => _CommandMenuSheetState();
@@ -182,7 +190,15 @@ class _CommandMenuSheetState extends State<_CommandMenuSheet> {
         onRetry: () => _load(force: true),
       );
     }
-    final filteredCommands = filterMenu(menu.commands, _query);
+    // 客户端 contribution 行并入命令组(重名跳过,宿主目录优先 —— web
+    // contribution 与宿主命令冲突时 fail loud,移动端降级为宿主行胜出)。
+    final hostNames = menu.commands.map((c) => c.name).toSet();
+    final allCommands = <CommandMenuItem>[
+      ...menu.commands,
+      for (final e in widget.extraItems)
+        if (!hostNames.contains(e.name)) e,
+    ];
+    final filteredCommands = filterMenu(allCommands, _query);
     final filteredSkills = filterMenu(menu.skills, _query);
     final hasAny = filteredCommands.isNotEmpty || filteredSkills.isNotEmpty;
 

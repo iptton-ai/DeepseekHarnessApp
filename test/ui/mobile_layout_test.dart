@@ -9,9 +9,12 @@ import 'package:singleman/sessions/command_store.dart';
 import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/sessions/settings_store.dart';
 import 'package:singleman/sessions/workspace_store.dart';
+import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/ui/chat_screen.dart';
 import 'package:singleman/ui/chat_view_model.dart';
 import 'package:singleman/ui/connect_config.dart';
+import 'package:singleman/ui/session_state_dot.dart'
+    show SessionPixelChaseDot;
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 class _FakeWorkspaceStore implements WorkspaceStoreView {
@@ -232,7 +235,7 @@ void main() {
         matching: find.byIcon(Icons.add),
       ),
       findsOneWidget,
-      reason: 'AppBar「新建会话」(composer「+」命令按钮另有同款 icon,需限定)',
+      reason: 'AppBar「新建会话」(命令入口已换 terminal 图标,无同款 add)',
     );
 
     // 标题锚点与标题栏动作簇各只一份:修复前 AppBar 与 pane 标题行
@@ -240,8 +243,26 @@ void main() {
     expect(find.byKey(const ValueKey('pane-title')), findsOneWidget);
     expect(find.byIcon(Icons.timeline), findsOneWidget,
         reason: '「轨迹」动作仅 AppBar 一份');
-    expect(find.byIcon(Icons.terminal), findsOneWidget,
-        reason: '「命令」动作仅 AppBar 一份');
+    // 命令与技能入口(用户诉求):标题栏移除,composer 工具行 terminal
+    // 按钮是全 app 唯一入口。
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byIcon(Icons.terminal),
+      ),
+      findsNothing,
+      reason: '标题栏不再承载命令入口',
+    );
+    expect(find.byKey(const ValueKey('composer-add-command')), findsOneWidget,
+        reason: 'composer terminal 命令按钮渲染');
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('composer-add-command')),
+        matching: find.byIcon(Icons.terminal),
+      ),
+      findsOneWidget,
+      reason: '命令入口图标 = terminal(原标题栏图标)',
+    );
   });
 
   testWidgets('composer 上方行:blank 会话显示工作区/工作模式 chip;会话开始后整体隐藏',
@@ -509,7 +530,7 @@ void main() {
         reason: '抽屉已收起,非 blank 会话 composer chip 不渲染');
   });
 
-  testWidgets('会话行:无专门图标,running 会话显示 loading 小动画', (tester) async {
+  testWidgets('会话行:running 显示像素追逐状态点(非 loading 环)', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final sessions = _FakeSessionView();
@@ -533,8 +554,10 @@ void main() {
     );
     await tester.pump();
 
-    // 仅 running 会话一个小动画;旧的状态图标全部移除。
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    // 仅 running 会话渲染追逐动画(web StateDot ongoing 像素追逐,非 loading 环);
+    // idle 行的 SessionStateDot 渲染为空(SizedBox.shrink)。
+    expect(find.byType(SessionPixelChaseDot), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.byIcon(Icons.chat_bubble_outline), findsNothing);
     expect(find.byIcon(Icons.autorenew), findsNothing);
     expect(find.byIcon(Icons.circle_outlined), findsNothing);
@@ -675,5 +698,35 @@ void main() {
       ),
       findsNothing,
     );
+  });
+
+  testWidgets('点会话区任意空白处:composer 失焦收起键盘(iOS 键盘挡屏实报)',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final sessions = _FakeSessionView();
+    sessions.emit([_summary('s1')]);
+    final vm = ChatViewModel(store: sessions, connection: null)
+      ..phase = ConnectionPhase.ready;
+
+    await tester.pumpWidget(MaterialApp(home: ChatScreen(vm: vm)));
+    await tester.pump();
+
+    // 前置:点输入框获得焦点(键盘弹出等价)。
+    final input = find.byKey(const ValueKey('composer-input'));
+    expect(input, findsOneWidget);
+    await tester.tap(input);
+    await tester.pump();
+    final node = tester.widget<TextField>(input).focusNode!;
+    expect(node.hasFocus, isTrue, reason: '前置:点击输入框应获得焦点');
+
+    // 点会话区空白处(空会话态顶角) → 失焦,键盘收起。
+    await tester.tapAt(
+      tester.getTopLeft(find.byKey(const ValueKey('conversation-area'))) +
+          const Offset(20, 20),
+    );
+    await tester.pump();
+    expect(node.hasFocus, isFalse,
+        reason: '点消息输入框以外的地方应失去焦点');
   });
 }

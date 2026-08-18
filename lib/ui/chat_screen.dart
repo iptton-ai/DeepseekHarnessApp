@@ -12,6 +12,7 @@ import 'package:singleman/connection/credentials.dart';
 import 'package:singleman/connection/host_info.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/job_store.dart';
+import 'package:singleman/sessions/session_attention_store.dart';
 import 'package:singleman/sessions/settings_store.dart';
 import 'package:singleman/sessions/subagent_store.dart';
 import 'package:singleman/sessions/workspace_store.dart';
@@ -19,12 +20,17 @@ import 'package:singleman/sessions/attachment_fetch.dart';
 import 'package:singleman/sessions/agent_preset_store.dart';
 import 'package:singleman/sessions/command_store.dart';
 import 'package:singleman/sessions/directory_store.dart';
+import 'package:singleman/sessions/goal_store.dart';
 import 'package:singleman/ui/chat_view_model.dart';
+import 'package:singleman/ui/goal_skill_widgets.dart';
+import 'package:singleman/ui/stats_bar.dart';
 import 'package:singleman/ui/command_menu_sheet.dart';
 import 'package:singleman/ui/composer_pro.dart';
 import 'package:singleman/ui/directory_browse_sheet.dart';
 import 'package:singleman/ui/node_widgets.dart';
 import 'package:singleman/sessions/theme_store.dart';
+import 'package:singleman/ui/session_attention_dialog.dart';
+import 'package:singleman/ui/session_state_dot.dart';
 import 'package:singleman/ui/trajectory_page.dart';
 import 'package:singleman/ui/connect_config.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
@@ -84,6 +90,7 @@ class ChatScreen extends StatelessWidget {
     this.attachments,
     this.theme,
     this.onCancelSession,
+    this.goals,
     this.onOpenPairing,
     this.hostStatus,
     this.hosts,
@@ -92,8 +99,12 @@ class ChatScreen extends StatelessWidget {
     this.onReconnect,
     this.deviceName,
     this.onSetDeviceName,
+    this.attentionVibrator,
   });
   final ChatViewModel vm;
+
+  /// 移动端关注提醒振动器注入(测试用;缺省 HapticFeedback 脉冲串)。
+  final AttentionVibrator? attentionVibrator;
 
   /// 新建会话;workspaceId 非空 = 归入该工作区,null = 未分组
   /// (web workspaces.startSession(workspaceId?) 语义)。
@@ -118,6 +129,9 @@ class ChatScreen extends StatelessWidget {
   // W3 域注入。
   final ThemeStoreView? theme;
   final void Function(String sessionId)? onCancelSession;
+
+  /// A8 goal 域(GoalPanel 动作);缺席时面板只读展示。
+  final GoalStore? goals;
 
   // M6/M6.1 远程连接:设置中心「连接」分区子菜单(入口在设置页内)。
   final VoidCallback? onOpenPairing;
@@ -177,6 +191,7 @@ class ChatScreen extends StatelessWidget {
           workspaces: workspaces,
           actions: actions,
           agentPresets: agentPresets,
+          goals: goals,
           onNewSession: onNewSession,
           onApproval: (a, allow) async {
             final it = vm.interactor;
@@ -275,7 +290,12 @@ class ChatScreen extends StatelessWidget {
             if (wide) {
               // 宽屏:侧栏支持最小化(_SidebarHost 292dp ↔ 56dp 轨道,参考
               // web ui-sidebar 折叠控件 + ui-layout COLLAPSED 56)。
-              return Scaffold(
+              // 宽屏不振动不弹窗(watcher enabled:false):侧栏状态点已足。
+              return SessionAttentionWatcher(
+                vm: vm,
+                enabled: false,
+                vibrator: attentionVibrator,
+                child: Scaffold(
                 body: Row(
                   children: [
                     Builder(
@@ -354,10 +374,16 @@ class ChatScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-              );
+              ),
+            );
             }
-            // 移动形态(<600dp):侧栏进抽屉,消息 pane 全屏。
-            return Scaffold(
+            // 移动形态(<600dp):侧栏进抽屉,消息 pane 全屏。非当前会话的
+            // 审批/问答到达 → 振动 3 秒 + 唯一聚合弹窗(watcher)。
+            return SessionAttentionWatcher(
+              vm: vm,
+              enabled: true,
+              vibrator: attentionVibrator,
+              child: Scaffold(
               appBar: AppBar(
                 // 标题栏显示当前会话标题(用户诉求:替代品牌名 + 连接徽标;
                 // 连接状态仍在抽屉侧栏头部可察)。
@@ -368,14 +394,14 @@ class ChatScreen extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
-                  // 标题栏动作簇与宽屏标题行同源(命令与技能/轨迹等)。
+                  // 标题栏动作簇与宽屏标题行同源(轨迹等;命令入口在
+                  // composer 工具行 terminal 按钮)。
                   ..._sessionTitleActions(
                     context,
                     vm: vm,
                     sid: vm.selectedId,
                     jobs: jobs,
                     subagents: subagents,
-                    commands: commands,
                   ),
                   if (onNewSession != null)
                     IconButton(
@@ -396,12 +422,13 @@ class ChatScreen extends StatelessWidget {
                   },
                 ),
               ),
-              // 窄屏抽屉:closeOnSelect = 选中/新建会话后自动收起抽屉。
-              drawer: Drawer(
-                width: 320,
-                child: SafeArea(child: _sidebar(closeOnSelect: true)),
+                // 窄屏抽屉:closeOnSelect = 选中/新建会话后自动收起抽屉。
+                drawer: Drawer(
+                  width: 320,
+                  child: SafeArea(child: _sidebar(closeOnSelect: true)),
+                ),
+                body: _ConversationBackdrop(child: paneFor(false)),
               ),
-              body: _ConversationBackdrop(child: paneFor(false)),
             );
           },
         );
@@ -701,24 +728,10 @@ class _SidebarState extends State<_Sidebar> {
                       children: [
                         const _BrandMark(),
                         const SizedBox(width: 10),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'DshAPP',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              SizedBox(height: 2),
-                              Text('AI 工作台', style: TextStyle(fontSize: 11)),
-                            ],
-                          ),
-                        ),
+                        // 标题块:有主机簿 = 主机切换下拉(显示当前宿主,
+                        // 点开列出全部已配对主机);无簿(桌面 loopback
+                        // 零凭证)保持静态「DshAPP / AI 工作台」。
+                        Expanded(child: _sidebarTitle()),
                         const SizedBox(width: 6),
                         // 连接状态徽标上移头部(原 gen1 徽标独占一行浪费空间;
                         // ready 态显示「已连接」,诊断代际收进 tooltip)。
@@ -766,6 +779,9 @@ class _SidebarState extends State<_Sidebar> {
               ),
             const Divider(height: 1),
             // W1:workspace 分组浏览器(注入存在时显示;替代纯扁平列表的分组语义)。
+            // loading = 连接未就绪:刚整代重装(切主机)/ 首启连接窗口里列表
+            // 尚无数据 → 浏览器内部显示加载态;已有数据(同主机重连)照常
+            // 显示旧列表,不闪空。
             if (widget.workspaces != null)
               Expanded(
                 child: WorkspaceBrowser(
@@ -773,9 +789,11 @@ class _SidebarState extends State<_Sidebar> {
                   sessionStream: widget.vm.summaries,
                   initialSessions: widget.vm.sessions,
                   selectedSessionId: widget.vm.selectedId,
+                  attention: widget.vm.attention,
                   query: _query,
                   groupMode: _groupMode,
                   orderMode: _orderMode,
+                  loading: widget.vm.phase != ConnectionPhase.ready,
                   callbacks: WorkspaceBrowserCallbacks(
                     onSelectSession: _selectSession,
                     // 组头「+」显式带组 id;未分组桶为 null(继承当前工作区)。
@@ -802,7 +820,9 @@ class _SidebarState extends State<_Sidebar> {
             if (widget.workspaces == null)
               Expanded(
                 child: visible.isEmpty
-                    ? _SidebarEmptyState(hasQuery: _query.isNotEmpty)
+                    ? (widget.vm.phase != ConnectionPhase.ready
+                        ? const SessionListLoading()
+                        : _SidebarEmptyState(hasQuery: _query.isNotEmpty))
                     : ListView.builder(
                         padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
                         itemCount: visible.length,
@@ -816,15 +836,21 @@ class _SidebarState extends State<_Sidebar> {
                             minVerticalPadding: 7,
                             selected: selected,
                             // 与 WorkspaceBrowser 会话行一致:无专门图标,
-                            // running 会话在 18dp 槽内显示 loading 小动画。
+                            // 18dp 槽内状态点(running 像素追逐/待输入/
+                            // 错误/未读)。
                             leading: SizedBox(
                               width: 18,
                               height: 18,
-                              child: s.running
-                                  ? const Center(
-                                      child: SessionRunningIndicator(),
-                                    )
-                                  : null,
+                              child: Center(
+                                child: SessionStateDot(
+                                  status: widget.vm.attention?.statusOf(
+                                        s.sessionId,
+                                      ) ??
+                                      (s.running
+                                          ? SessionRowStatus.running
+                                          : SessionRowStatus.idle),
+                                ),
+                              ),
                             ),
                             // 标题 = web displayTitle 链:projections title
                             // → 工作区目录名 → 原始 id;blank 显示「新会话」。
@@ -910,6 +936,37 @@ class _SidebarState extends State<_Sidebar> {
       widget.actions?.onRename != null ||
       widget.actions?.onFork != null ||
       widget.actions?.onExport != null;
+
+  /// 头部标题块:主机簿非空 → 切换下拉;否则静态品牌文案。
+  Widget _sidebarTitle() {
+    final hosts = widget.hosts;
+    if (hosts == null || hosts.value.active == null) {
+      return const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'DshAPP',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+          ),
+          SizedBox(height: 2),
+          Text('AI 工作台', style: TextStyle(fontSize: 11)),
+        ],
+      );
+    }
+    // 标签只由簿驱动(与菜单勾选态同源同拍):连接层的实时机器名属于
+    // 旧代连接,簿翻转而整代重装未落地的一瞬会显示成旧宿主 —— 设置页
+    // 活动行才承载实时机器名。
+    return ValueListenableBuilder<HostBook>(
+      valueListenable: hosts,
+      builder: (context, book, _) => _HostSwitcher(
+        book: book,
+        onSwitchHost: widget.onSwitchHost,
+        onOpenPairing: widget.onOpenPairing,
+      ),
+    );
+  }
 
   /// 工具区(web 区头复刻):搜索 / 排序方式 / 分组方式 / 添加工作区
   /// 并列一行;搜索展开时输入框占全行,其余按钮让位(web sectionHeader:
@@ -1062,6 +1119,135 @@ class _SidebarState extends State<_Sidebar> {
       case 'export':
         actions.onExport?.call(sessionId);
     }
+  }
+}
+
+/// 主机切换下拉菜单里「添加主机(配对)」的动作值(与条目 id 空间隔离)。
+const String _kAddHostAction = '__add_host__';
+
+/// 侧栏头部主机切换器:当前宿主名 + 展开箭头;点开列出簿内全部主机
+/// (活动项打勾)与「添加主机(配对)」。选中其他主机走设置页同款
+/// onSwitchHost(活动指针翻转 + 整代重装)。标签与勾选态都由簿驱动
+/// (hostLabel > 网关地址)—— 与簿同拍翻转,不受连接层旧机器名干扰。
+class _HostSwitcher extends StatelessWidget {
+  const _HostSwitcher({
+    required this.book,
+    this.onSwitchHost,
+    this.onOpenPairing,
+  });
+
+  final HostBook book;
+  final Future<void> Function(String hostId)? onSwitchHost;
+  final VoidCallback? onOpenPairing;
+
+  String _labelOf(StoredCredentials h) =>
+      h.hostLabel.isEmpty ? h.baseUri.authority : h.hostLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final active = book.active;
+    if (active == null) return const SizedBox.shrink();
+    final label = _labelOf(active);
+    return PopupMenuButton<String>(
+      key: const ValueKey('host-switcher'),
+      tooltip: '切换主机',
+      position: PopupMenuPosition.under,
+      initialValue: active.id,
+      onSelected: (value) {
+        if (value == _kAddHostAction) {
+          onOpenPairing?.call();
+          return;
+        }
+        if (value != active.id) onSwitchHost?.call(value);
+      },
+      itemBuilder: (context) => [
+        for (final h in book.hosts)
+          CheckedPopupMenuItem(
+            value: h.id,
+            checked: h.id == active.id,
+            // 副行 = 网关地址:同机名多条(如 rust/CF 两条通道进同一台
+            // dsh)靠它分辨 —— 这类条目切换后会话列表本来就相同。
+            // label 本身回落 authority 时不再重复展示。
+            child: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    _labelOf(h),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (_labelOf(h) != h.baseUri.authority) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      h.baseUri.authority,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        if (onOpenPairing != null) ...[
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: _kAddHostAction,
+            height: 48,
+            child: Row(
+              children: [
+                Icon(Icons.add, size: 18),
+                SizedBox(width: 8),
+                Text('添加主机(配对)'),
+              ],
+            ),
+          ),
+        ],
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'DshAPP',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 2),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: colors.primary.withValues(alpha: .9),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Icon(
+                  Icons.expand_more,
+                  size: 14,
+                  color: colors.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -1427,7 +1613,9 @@ String _selectedSessionTitle(ChatViewModel vm) {
 }
 
 /// 会话区标题栏动作簇(窄屏 AppBar actions 与宽屏标题行共用一份):
-/// subagent 目录 / 后台任务 / 轨迹 / 命令与技能。
+/// subagent 目录 / 后台任务 / 轨迹。
+/// 命令与技能入口已按用户诉求移到 composer 工具行 terminal 按钮(全 app
+/// 唯一入口),标题栏不再承载。
 /// [sid] 为空(未选会话)时动作全部让位 —— 它们都是按会话寻址的。
 List<Widget> _sessionTitleActions(
   BuildContext context, {
@@ -1435,7 +1623,6 @@ List<Widget> _sessionTitleActions(
   required String? sid,
   JobStoreView? jobs,
   SubagentStore? subagents,
-  CommandStoreView? commands,
 }) {
   if (sid == null) return const <Widget>[];
   return <Widget>[
@@ -1462,43 +1649,30 @@ List<Widget> _sessionTitleActions(
         );
       },
     ),
-    if (commands != null)
-      IconButton(
-        tooltip: '命令',
-        icon: const Icon(Icons.terminal),
-        onPressed: () => _openCommandMenu(context, sid, commands),
-      ),
   ];
 }
 
-/// 打开命令与技能菜单(composer 底部「+」与标题栏「命令」共用)。
-/// 命令 → execute(目录内预校验);skill → prompt 文本('/name' token,
-/// dsh-tool-skill 在 pre-step 识别,DSH-PROTOCOL §5)。sheet 自行关闭。
-Future<void> _openCommandMenu(
-  BuildContext context,
-  String sessionId,
-  CommandStoreView store,
-) {
+/// 打开命令与技能菜单的分发决策表(对齐 web ui-commands service.dispatch +
+/// ui-skill onPick;调用方为 _MessagePaneState._openCommandMenu):
+/// - contribution/装饰命令 → 各自交互面(model → 模型选择器;permission →
+///   权限预设表,选中即执行 '/permission <preset>');
+/// - 其余宿主命令带 input.hint(leadingInput)→ 回填 '/name ' 到输入框;
+/// - 裸宿主命令 → 直接 commands/execute(export 成功追加导出后续);
+/// - skill → 回填 '/name '(纯文本,发送时 host pre-step 识别,
+///   DSH-PROTOCOL §5)。
+Future<void> _showCommandMenu(
+  BuildContext context, {
+  required String sessionId,
+  required CommandStoreView store,
+  required void Function(CommandMenuItem item) onPick,
+  List<CommandMenuItem> extraItems = const <CommandMenuItem>[],
+}) {
   return showCommandMenu(
     context,
     sessionId: sessionId,
     store: store,
-    onPick: (item) async {
-      if (item.kind == CommandMenuItemKind.command) {
-        try {
-          await store.execute(sessionId, '/${item.name}');
-        } on Object catch (e) {
-          _toast(context, '命令执行失败: $e');
-        }
-      } else {
-        final sender = ChatSenderBinding.of(context);
-        try {
-          await sender(sessionId, '/${item.name}');
-        } on Object catch (e) {
-          _toast(context, '发送失败: $e');
-        }
-      }
-    },
+    onPick: onPick,
+    extraItems: extraItems,
   );
 }
 
@@ -1757,6 +1931,91 @@ Future<bool?> _confirmFullAccess(BuildContext context) {
 ///
 /// 预设目录/模型名是异步数据,面板持少量本地缓存(按会话 id 失效),
 /// 其余状态全部来自 [ChatViewModel](刷新安全纪律同 _InteractorPane)。
+/// A8 goal 面板包装:读 VM 的 goal 投影 + GoalStore 动作(create/edit 走
+/// 文本输入对话框;pause/resume/complete 直调)。域缺席只读展示。
+class _GoalDock extends StatefulWidget {
+  const _GoalDock({required this.vm, this.goals});
+  final ChatViewModel vm;
+  final GoalStore? goals;
+
+  @override
+  State<_GoalDock> createState() => _GoalDockState();
+}
+
+class _GoalDockState extends State<_GoalDock> {
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() op) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await op();
+    } on Object catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text('目标操作失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<String?> _promptObjective(String title, String initial) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          maxLines: 3,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '目标描述'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.goals;
+    if (store == null) return const SizedBox.shrink();
+    final proj = widget.vm.selectedGoalProjection;
+    return AnimatedBuilder(
+      animation: widget.vm,
+      builder: (context, _) => GoalPanel(
+        projection: widget.vm.selectedGoalProjection,
+        busy: _busy,
+        onCreate: () async {
+          final text = await _promptObjective('新建目标', '');
+          if (text == null || text.isEmpty) return;
+          await _run(() => store.create(text));
+        },
+        onEdit: (ref) async {
+          final current = proj?['goal'];
+          final objective = current is Map && current['objective'] is String
+              ? current['objective'] as String?
+              : '';
+          final text = await _promptObjective('编辑目标', objective ?? '');
+          if (text == null || text.isEmpty) return;
+          await _run(() => store.edit(ref, objective: text));
+        },
+        onPause: (ref) => _run(() => store.pause(ref)),
+        onResume: (ref) => _run(() => store.resume(ref)),
+        onComplete: (ref) => _run(() => store.complete(ref)),
+      ),
+    );
+  }
+}
+
 class _MessagePane extends StatefulWidget {
   const _MessagePane({
     required this.vm,
@@ -1772,6 +2031,7 @@ class _MessagePane extends StatefulWidget {
     this.workspaces,
     this.actions,
     this.agentPresets,
+    this.goals,
     this.onNewSession,
     this.showTitleRow = true,
   });
@@ -1785,6 +2045,9 @@ class _MessagePane extends StatefulWidget {
   final WorkspaceStoreView? workspaces;
   final SessionActions? actions;
   final AgentPresetStoreView? agentPresets;
+
+  /// A8 goal 域(面板动作;缺席只读)。
+  final GoalStore? goals;
 
   /// 新建会话(工作区切换选中即在目标工作区新建)。
   final void Function(String? workspaceId)? onNewSession;
@@ -1819,10 +2082,22 @@ class _MessagePaneState extends State<_MessagePane> {
   /// 当前会话模型显示名(模型 chip;null = 未加载)。
   String? _modelName;
 
+  /// composer 输入归属 pane(命令菜单选中 skill/leadingInput 命令后回填
+  /// '/name ' 用;web 斜杠菜单 pick 的 {text:'/name '} 语义)。
+  final TextEditingController _composerController = TextEditingController();
+  final FocusNode _composerFocus = FocusNode();
+
   @override
   void initState() {
     super.initState();
     _ensureLoaded();
+  }
+
+  @override
+  void dispose() {
+    _composerFocus.dispose();
+    _composerController.dispose();
+    super.dispose();
   }
 
   @override
@@ -1831,7 +2106,8 @@ class _MessagePaneState extends State<_MessagePane> {
     _ensureLoaded();
   }
 
-  /// 会话切换 → 预设目录/模型名按需重拉(同会话不重复)。
+  /// 会话切换 → 预设目录/模型名按需重拉(同会话不重复);composer 输入
+  /// 清空(原语义:换会话即空输入,controller 归 pane 后需显式延续)。
   void _ensureLoaded() {
     final sid = widget.vm.selectedId;
     if (sid == _loadedForSid) return;
@@ -1839,8 +2115,81 @@ class _MessagePaneState extends State<_MessagePane> {
     _presetNames = const <String, String>{};
     _defaultPresetId = null;
     _modelName = null;
+    _composerController.clear();
     _loadRoster();
     _loadModelLabel();
+  }
+
+  /// 回填命令 token 到输入框并聚焦(替换现有草稿 —— 菜单从工具行打开,
+  /// 草稿通常为空;光标置尾便于续输参数)。
+  void _insertComposerToken(String token) {
+    _composerController
+      ..text = token
+      ..selection = TextSelection.collapsed(offset: token.length);
+    _composerFocus.requestFocus();
+  }
+
+  /// 打开命令与技能菜单(composer 工具行 terminal 按钮,全 app 唯一入口)。
+  /// 点击分发对齐 web 斜杠菜单(ui-commands dispatch + ui-skill onPick):
+  /// 见 _showCommandMenu 文档。
+  Future<void> _openCommandMenu(String sessionId, CommandStoreView store) {
+    final vm = widget.vm;
+    return _showCommandMenu(
+      context,
+      sessionId: sessionId,
+      store: store,
+      extraItems: (widget.actions?.onPickModel == null)
+          ? const <CommandMenuItem>[]
+          : <CommandMenuItem>[
+              // web ui-model-selection 的 /model contribution 对齐:
+              // 客户端注册的命令行,点击打开模型选择器。
+              CommandMenuItem.command(
+                const CommandEntry(name: 'model', description: '切换此会话的模型'),
+              ),
+            ],
+      onPick: (item) async {
+        // 1) 客户端 contribution:model → 模型选择器(web popupSelect)。
+        if (item.name == 'model' && widget.actions?.onPickModel != null) {
+          widget.actions!.onPickModel!();
+          return;
+        }
+        // 2) 装饰命令:permission → 权限预设表(web decoration popup;
+        //   选中即 '/permission <preset>',与 composer 权限 chip 同路径)。
+        if (item.isCommand && item.name == 'permission') {
+          await _pickPermission(
+            context,
+            sessionId: sessionId,
+            current: vm.selectedPermissionPreset ?? 'default',
+            commands: store,
+          );
+          return;
+        }
+        if (item.isCommand) {
+          // 3) leadingInput 命令(feedback/goal/plan):回填 '/name '
+          //    (web claim 语义;提交经 _sendAdjudicated 走 commands/execute)。
+          final hint = item.hint;
+          if (hint != null && hint.isNotEmpty) {
+            _insertComposerToken('/${item.name} ');
+            return;
+          }
+          // 4) 裸命令(compact/export):立即执行(web detached run)。
+          try {
+            await store.execute(sessionId, '/${item.name}');
+            // export 后续(web:命令成功 → 浏览器下载 ZIP;App 等价物 =
+            // 既有导出回调,main 侧写临时 zip)。
+            if (item.name == 'export' && widget.actions?.onExport != null) {
+              widget.actions!.onExport!(sessionId);
+            }
+          } on Object catch (e) {
+            _toast(context, '命令执行失败: $e');
+          }
+          return;
+        }
+        // 5) skill:回填 '/name ' 纯文本,不直接发送(web onPick {text};
+        //    发送时 host pre-step 识别 token 注入技能体)。
+        _insertComposerToken('/${item.name} ');
+      },
+    );
   }
 
   Future<void> _loadRoster() async {
@@ -1895,8 +2244,8 @@ class _MessagePaneState extends State<_MessagePane> {
     final colors = Theme.of(context).colorScheme;
     return Column(
       children: [
-        // 标题栏:当前会话标题 + 动作簇(subagent 目录/后台任务/轨迹/命令与
-        // 技能;无动作注入不渲染)。原「对话工作台」文案行已按用户诉求移除。
+        // 标题栏:当前会话标题 + 动作簇(subagent 目录/后台任务/轨迹;命令与
+        // 技能入口已按用户诉求移到 composer 工具行,此处不再承载)。
         // 仅宽屏渲染(showTitleRow):窄屏 AppBar 已承载同款标题 + 动作簇。
         if (widget.showTitleRow &&
             sid != null &&
@@ -1930,27 +2279,33 @@ class _MessagePaneState extends State<_MessagePane> {
                   sid: sid,
                   jobs: widget.jobs,
                   subagents: widget.subagents,
-                  commands: widget.commands,
                 ),
               ],
             ),
           ),
         Expanded(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 220),
-            switchInCurve: Curves.easeOut,
-            switchOutCurve: Curves.easeIn,
-            child: vm.nodes.isNotEmpty
-                ? ChatNodeList(
-                    key: const ValueKey('node-list'),
-                    nodes: vm.nodes,
-                    sessionId: vm.selectedId,
-                    attachmentFetcher: widget.attachments,
-                    // 消息操作区「分叉」:fork 当前会话 → 切换到子会话
-                    //(对齐 web sessions.fork → open(childId))。
-                    onFork: (seq) => vm.forkSelectedAt(seq),
-                  )
-                : (vm.bubbles.isEmpty
+          // 点会话区任意处(消息/空白/空态)失焦收起键盘 —— 用户实报:
+          // iOS 键盘常驻挡半屏。opaque:不吃命中的区域也触发;消息内
+          // 按钮/链接在 gesture arena 更深、先行胜出,不受影响。
+          child: GestureDetector(
+            key: const ValueKey('conversation-area'),
+            behavior: HitTestBehavior.opaque,
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              child: vm.nodes.isNotEmpty
+                  ? ChatNodeList(
+                      key: const ValueKey('node-list'),
+                      nodes: vm.nodes,
+                      sessionId: vm.selectedId,
+                      attachmentFetcher: widget.attachments,
+                      // 消息操作区「分叉」:fork 当前会话 → 切换到子会话
+                      //(对齐 web sessions.fork → open(childId))。
+                      onFork: (seq) => vm.forkSelectedAt(seq),
+                    )
+                  : (vm.bubbles.isEmpty
                       ? (vm.historyLoading && !vm.selectedBlank
                             // 非空会话装载历史中:加载态,不闪「准备好开始了吗」
                             // 的空白会话 UI(blank 会话才配那个空态)。
@@ -1967,6 +2322,9 @@ class _MessagePaneState extends State<_MessagePane> {
                       : ListView.builder(
                           key: const ValueKey('legacy-bubbles'),
                           padding: const EdgeInsets.all(12),
+                          // 拖动列表即收键盘(iOS 标准交互;键盘挡屏实报)。
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
                           itemCount: vm.bubbles.length,
                           itemBuilder: (context, i) {
                             final b = vm.bubbles[i];
@@ -2015,6 +2373,7 @@ class _MessagePaneState extends State<_MessagePane> {
                             );
                           },
                         )),
+            ),
           ),
         ),
         _InteractorPane(
@@ -2027,6 +2386,10 @@ class _MessagePaneState extends State<_MessagePane> {
         // 任务清单面板(web conversation.input.dock order 0):todo/write
         // 投影,挂在输入区正上方;空清单零渲染。
         TodoPanel(todos: vm.todos),
+        // A8 goal 面板(web GoalBar:composer dock 常驻,有目标才渲染)。
+        _GoalDock(vm: vm, goals: widget.goals),
+        // A3 统计条(web StatsLine:composer dock;空会话零渲染)。
+        SessionStatsBar(stats: vm.stats),
         if (vm.lastError != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
@@ -2063,6 +2426,9 @@ class _MessagePaneState extends State<_MessagePane> {
               key: ValueKey('composer-${sid ?? 'none'}'),
               running: vm.selectedRunning,
               canSend: vm.canSend,
+              // 输入归属 pane:命令菜单回填 '/name ' + 聚焦续输(会话切换清空)。
+              controller: _composerController,
+              focusNode: _composerFocus,
               // ── web InputBar 对齐:上方行(工作区 + 工作模式) ──
               // 仅 blank 会话(尚未开始)渲染 —— web hero 形态专属;会话一旦
               // 开始,工作区/预设都已固定,上方行整体隐藏(用户诉求)。
@@ -2096,10 +2462,10 @@ class _MessagePaneState extends State<_MessagePane> {
                       currentId: vm.selectedAgentPreset,
                       onChanged: _loadRoster,
                     ),
-              // ── web InputBar 对齐:底部工具行(+ 命令 / 权限 / 模型) ──
+              // ── web InputBar 对齐:底部工具行(terminal 命令 / 权限 / 模型) ──
               onAddCommand: (widget.commands == null || sid == null)
                   ? null
-                  : () => _openCommandMenu(context, sid, widget.commands!),
+                  : () => _openCommandMenu(sid, widget.commands!),
               // 权限切换依赖 commands/execute 通道:目录域缺席 → 不渲染 chip
               //(无法落地的切换入口只会误导)。
               permissionLabel: (sid == null || widget.commands == null)
@@ -2129,6 +2495,29 @@ class _MessagePaneState extends State<_MessagePane> {
               onSend: (text, {required steer}) async {
                 final sid = vm.selectedId;
                 if (sid == null) return;
+                // 斜杠仲裁(web matchEnter 对齐):首 token 命中宿主命令目录 →
+                // commands/execute(裸/带参皆然);skill 行/未知行放行走
+                // prompt(host pre-step 识别 '/name')。命令域缺席则不仲裁。
+                final store = widget.commands;
+                final name = commandNameOf(text);
+                if (store != null && name != null) {
+                  final dir = await store.listCommands(sid);
+                  // 目录降级:agent-busy(子代理会话)按 web 语义视为空目录
+                  // 放行走 prompt;其余失败强拒绝(web ensureReady 拒绝提交)。
+                  if (dir.isDegraded && !dir.isAgentBusy) {
+                    throw CommandExecuteException(
+                      '命令目录未就绪,无法判断 /$name;请稍后重试',
+                    );
+                  }
+                  final hit = !dir.isDegraded &&
+                      dir.commands.any((c) => c.name == name);
+                  if (hit) {
+                    // execute 目录内预校验(缓存已被上面的 listCommands 填好);
+                    // 失败抛 → composer 内联错误,输入保留可重试。
+                    await store.execute(sid, text.trim());
+                    return; // 成功 → composer 清空输入
+                  }
+                }
                 // 发送/插话同一回调;错误由组件内联映射展示。
                 final senderWithSteer = ChatSenderBinding.senderWithSteerOf(
                   context,
@@ -2215,16 +2604,23 @@ class _InteractorPaneState extends State<_InteractorPane> {
     if (widget.vm.interactor != _subscribedTo) {
       _connect();
     }
-    // 会话切换 → 队列从快照重读。
+    // 会话切换 → 交互卡/队列按新选中会话从快照重读(跨会话的卡不在
+    // 当前会话渲染 —— 用户进入该会话时才见,M5 门控语义)。
     if (widget.vm.selectedId != _selectedId) {
       _selectedId = widget.vm.selectedId;
-      final queues = _subscribedTo?.currentQueues;
+      final it = _subscribedTo;
       final sid = _selectedId;
-      setState(
-        () => _queue = (sid != null && queues != null)
-            ? (queues[sid] ?? const [])
-            : const [],
-      );
+      setState(() {
+        _approvals = (it?.currentApprovals ?? const <PendingApproval>[])
+            .where((a) => a.sessionId == sid)
+            .toList();
+        _questions = (it?.currentQuestions ?? const <PendingQuestion>[])
+            .where((q) => q.sessionId == sid)
+            .toList();
+        _queue = (sid != null)
+            ? (it?.currentQueues[sid] ?? const [])
+            : const [];
+      });
     }
   }
 
@@ -2235,21 +2631,43 @@ class _InteractorPaneState extends State<_InteractorPane> {
     _subs.clear();
     final it = widget.vm.interactor;
     _subscribedTo = it;
-    if (it == null) return;
+    if (it == null) {
+      _approvals = const [];
+      _questions = const [];
+      _queue = const [];
+      return;
+    }
     // 播种:current* 是最新收敛快照(广播流不重放,纯 listen 会漏)。
-    _approvals = it.currentApprovals;
-    _questions = it.currentQuestions;
+    // 只保留当前选中会话的卡(M5:跨会话交互不在别人的会话里弹)。
     _selectedId = widget.vm.selectedId;
     final sid0 = _selectedId;
+    _approvals = it.currentApprovals
+        .where((a) => a.sessionId == sid0)
+        .toList();
+    _questions = it.currentQuestions
+        .where((q) => q.sessionId == sid0)
+        .toList();
     _queue = sid0 == null ? const [] : (it.currentQueues[sid0] ?? const []);
     _subs.add(
       it.approvals.listen((l) {
-        if (mounted) setState(() => _approvals = l);
+        if (mounted) {
+          setState(
+            () => _approvals = l
+                .where((a) => a.sessionId == widget.vm.selectedId)
+                .toList(),
+          );
+        }
       }),
     );
     _subs.add(
       it.questions.listen((l) {
-        if (mounted) setState(() => _questions = l);
+        if (mounted) {
+          setState(
+            () => _questions = l
+                .where((q) => q.sessionId == widget.vm.selectedId)
+                .toList(),
+          );
+        }
       }),
     );
     _subs.add(
@@ -2272,16 +2690,6 @@ class _InteractorPaneState extends State<_InteractorPane> {
     super.dispose();
   }
 
-  /// 会话短标签:当前会话 → null(不显示);其它会话 → '会话·后 4 位'。
-  String? _labelFor(String sessionId) {
-    final selected = widget.vm.selectedId;
-    if (selected == sessionId) return null;
-    final tail = sessionId.length <= 4
-        ? sessionId
-        : sessionId.substring(sessionId.length - 4);
-    return '会话 ·$tail';
-  }
-
   @override
   Widget build(BuildContext context) {
     // 多卡并存时限高滚动:待办审批/问答/队列可能同时堆积,不限高会把
@@ -2296,11 +2704,6 @@ class _InteractorPaneState extends State<_InteractorPane> {
             ApprovalCards(
               approvals: _approvals,
               onRespond: (a, allow) => widget.onApproval?.call(a, allow),
-              sessionLabel: {
-                for (final a in _approvals)
-                  if (_labelFor(a.sessionId) != null)
-                    a.rpcId: _labelFor(a.sessionId)!,
-              },
             ),
             for (final q in _questions)
               QuestionForm(
@@ -2308,7 +2711,6 @@ class _InteractorPaneState extends State<_InteractorPane> {
                 question: q,
                 onSubmit: (drafts) =>
                     widget.onQuestion?.call(q, drafts) ?? Future.value(null),
-                sessionLabel: _labelFor(q.sessionId),
               ),
             QueueDock(
               items: _queue,

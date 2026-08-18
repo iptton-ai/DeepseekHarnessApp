@@ -308,17 +308,23 @@ void main() {
     expect(find.text('审批请求'), findsNothing);
   });
 
-  testWidgets('跨会话审批/提问带归属徽标', (tester) async {
+  testWidgets('跨会话审批/提问不在当前会话渲染;切入该会话后才出现', (tester) async {
     sessions.emit([_summary('session-s1'), _summary('session-ab12')]);
     await pumpScreen(tester);
     feedQuestion('qr-other', sessionId: 'session-ab12');
     await tester.pump(const Duration(milliseconds: 50));
-    // 徽标文本 = '会话 ·ab12'。
-    expect(find.text('会话 ·ab12'), findsOneWidget);
-    // 当前会话(s1)自己的问题不带徽标。
+    // M5 门控:别的会话的问题不在当前会话(s1)弹卡 —— 用户没在那里。
+    expect(find.text('继续吗?'), findsNothing);
+    expect(find.text('代理提问'), findsNothing);
+    // 当前会话自己的问题就地渲染。
     feedQuestion('qr-mine');
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('继续吗?'), findsNWidgets(2));
+    expect(find.text('继续吗?'), findsOneWidget);
+    // 切入 ab12:跨会话问题从快照播种出现(不依赖新帧)。
+    vm.select('session-ab12');
+    await tester.pump();
+    expect(find.text('继续吗?'), findsOneWidget);
+    expect(vm.selectedId, 'session-ab12');
   });
 
   testWidgets('队列 Dock:切会话后从快照重读(不漏不串);仅显示 queued 项', (tester) async {

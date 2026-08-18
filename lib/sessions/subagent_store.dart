@@ -2,8 +2,7 @@
 //
 // 契约(DSH-PROTOCOL §3 subagent 组 + subagents.schema.js):
 // - subagent.list({parentSessionId}) → {entries, parentAvailable};目录按 parent 缓存,
-//   失效点 = 代际 ready(重连=全量重取)、父会话运行状态翻转(host/session-status)、
-//   显式 invalidateChildren(prompt/interrupt 后由 UI 触发)
+//   失效点 = 代际 ready(重连=全量重取);host 帧行内维护(见下)
 // - subagent.history({parentSessionId, childSessionId, mode, beforeSeq?, maxMessages?})
 //   → {events, hasMore};mode 取自目录行('one-shot'|'continuable'),store 不假设
 // - subagent.prompt / subagent.interrupt 的 mode 恒为 'continuable';仅当目录行
@@ -11,8 +10,21 @@
 // - transcript 是只读事件日志(复用 SessionEvent):分页装载 + seq 去重,缓存跨代际
 //   保留;mux session/event 帧到达已缓存 child 时增量追加(运行中子会话实时更新)
 //
-// 不变式:目录缓存只增不减直到显式失效;transcript 事件 seq 严格去重;错误不吞,
-// 原样抛给 UI(subagentErrorMessage 提供可读文案)。
+// 目录状态机(对齐 web dsh-client-runtime sessions/manager.refreshSubagents):
+// - per-parent 三态 loading/ready/error;错误保留旧 entries(UI 旧数据可用 + 可重试);
+// - 单飞复用(同一 parent 并发刷新共享一次往返);
+// - host/session-status → child 行 activity **行内翻转**(零 RPC,不整目录失效);
+// - host/session-added(origin=subagent)→ 子行 hasChildren 正提示 + 防抖重拉其父
+//   目录(新孙行可见;对齐 web markCatalogParentExpandable + scheduleCatalogRefresh);
+// - host/session-removed → 行内折 activity;该会话作为目录 owner 时 parentAvailable
+//   即时置 false(web:removed 会话不再是任何 catalog 的投递属主)。
+//
+// 后代聚合(对齐 web indexSubagentDescendants):注入会话摘要流后,origin=='subagent'
+// 的行沿 parentId 链向上累计 count/runningCount(普通 fork 断链 —— 每个可见会话只
+// 拥有「不间断 subagent 血统」的后代);入口按钮计数与可见性以此为准。
+//
+// 不变式:transcript 事件 seq 严格去重;错误不吞,原样抛给 UI
+// (subagentErrorMessage 提供可读文案)。
 import 'dart:async';
 
 import 'package:singleman/connection/api_client.dart';
@@ -108,69 +120,251 @@ String subagentErrorMessage(Object error) {
   return '操作失败: $error';
 }
 
-class SubagentStore {
-  SubagentStore({required this.api, required this.connection}) {
+/// 目录装载状态(对齐 web runtime refreshSubagents 三态)。
+enum SubagentCatalogPhase { loading, ready, error }
+
+/// 一个 parent 的子代理目录快照 + 装载状态。
+///
+/// error 态保留上次的 [entries](UI 旧数据仍可用,带重试);loading 态
+/// 同样保留(展开分支时的既有行不闪烁)。
+class SubagentCatalogState {
+  const SubagentCatalogState({
+    required this.entries,
+    required this.parentAvailable,
+    required this.phase,
+    this.error,
+  });
+
+  final List<SubagentListEntry> entries;
+  final bool parentAvailable;
+  final SubagentCatalogPhase phase;
+  final Object? error;
+}
+
+/// 某会话的「不间断 subagent 血统」后代计数(对齐 web SubagentDescendantSummary)。
+class SubagentDescendants {
+  const SubagentDescendants({required this.count, required this.runningCount});
+
+  final int count;
+  final int runningCount;
+}
+
+/// 纯聚合:每个 origin=='subagent' 的会话沿 parentId 链向上累计,直到链断
+/// (父不是 subagent origin / 父不在列表 / 环)。普通 fork(无 origin)不传播
+/// —— 每个可见会话只拥有不间断血统的后代。环容错(seen 集)。
+Map<String, SubagentDescendants> indexSubagentDescendants(
+    List<SessionSummary> summaries) {
+  final byId = <String, SessionSummary>{
+    for (final s in summaries) s.sessionId: s,
+  };
+  final indexed = <String, _MutableDescendants>{};
+  for (final descendant in summaries) {
+    if (descendant.origin != 'subagent') continue;
+    final running = descendant.running;
+    var current = descendant;
+    final seen = <String>{};
+    while (current.parentSessionId != null &&
+        current.origin == 'subagent' &&
+        !seen.contains(current.sessionId)) {
+      seen.add(current.sessionId);
+      final parent = byId[current.parentSessionId!];
+      if (parent == null) break;
+      final aggregate = indexed.putIfAbsent(
+          current.parentSessionId!, () => _MutableDescendants());
+      aggregate.count += 1;
+      if (running) aggregate.runningCount += 1;
+      current = parent;
+    }
+  }
+  return {
+    for (final e in indexed.entries)
+      e.key: SubagentDescendants(
+          count: e.value.count, runningCount: e.value.runningCount),
+  };
+}
+
+class _MutableDescendants {
+  int count = 0;
+  int runningCount = 0;
+}
+
+/// UI 依赖的窄视图(便于 widget 测试用假实现注入,不碰 socket;
+/// 与 SessionStoreView 同哲学)。UI 只消费广播流与方法,不碰 wire。
+abstract class SubagentStoreView {
+  Stream<Map<String, SubagentCatalogState>> get catalogs;
+  Stream<Map<String, SubagentDescendants>> get descendants;
+  Map<String, SubagentDescendants> get currentDescendants;
+  SubagentCatalogState? catalogFor(String parentSessionId);
+  SessionSummary? summaryFor(String sessionId);
+  SubagentTranscript transcriptFor(String childSessionId);
+  Future<SubagentCatalogState> listChildren(String parentSessionId,
+      {bool force = false});
+  Future<List<SessionEvent>> readTranscript(
+    String parentSessionId,
+    String childSessionId, {
+    required String mode,
+    int? maxMessages,
+    bool full,
+  });
+  Future<List<SessionEvent>> loadOlderTranscript(
+    String parentSessionId,
+    String childSessionId, {
+    required String mode,
+    int? maxMessages,
+  });
+  Future<SubagentPromptValue> promptChild(
+    String parentSessionId,
+    String childSessionId,
+    String text, {
+    String? clientTimeZone,
+  });
+  Future<SubagentInterruptValue> interruptChild(
+      String parentSessionId, String childSessionId);
+  Future<void> invalidateChildren(String parentSessionId);
+}
+
+class SubagentStore implements SubagentStoreView {
+  SubagentStore({required this.api, required this.connection,
+      Stream<List<SessionSummary>>? summaries}) {
     _catalogsController =
-        StreamController<Map<String, SubagentListValue>>.broadcast();
+        StreamController<Map<String, SubagentCatalogState>>.broadcast();
+    _descendantsController =
+        StreamController<Map<String, SubagentDescendants>>.broadcast();
     _snapshotsSub = connection.snapshots.listen(_onSnapshot);
     _muxSub = connection.muxFrames.listen(_onMuxFrame);
     _hostSub = connection.hostFrames.listen(_onHostFrame);
+    _summariesSub = summaries?.listen(_onSummaries);
   }
 
   final ApiClient api;
   final ConnectionController connection;
 
-  late final StreamController<Map<String, SubagentListValue>> _catalogsController;
-  final Map<String, SubagentListValue> _catalogs = <String, SubagentListValue>{};
+  late final StreamController<Map<String, SubagentCatalogState>> _catalogsController;
+  late final StreamController<Map<String, SubagentDescendants>>
+      _descendantsController;
+  final Map<String, SubagentCatalogState> _catalogs =
+      <String, SubagentCatalogState>{};
   final Map<String, SubagentTranscript> _transcripts =
       <String, SubagentTranscript>{};
+  final Map<String, SessionSummary> _summariesById = <String, SessionSummary>{};
+  Map<String, SubagentDescendants> _descendants =
+      <String, SubagentDescendants>{};
+  final Map<String, Future<void>> _catalogInflight = <String, Future<void>>{};
+  final Set<String> _catalogStale = <String>{};
+  final Map<String, Timer> _catalogDebounce = <String, Timer>{};
   StreamSubscription<ConnectionSnapshot>? _snapshotsSub;
   StreamSubscription<MuxFrame>? _muxSub;
   StreamSubscription<HostFrame>? _hostSub;
+  StreamSubscription<List<SessionSummary>>? _summariesSub;
   int _lastReadyGeneration = 0;
   bool _disposed = false;
 
-  /// 目录快照广播流(parentSessionId -> SubagentListValue)。
-  Stream<Map<String, SubagentListValue>> get catalogs =>
+  /// 目录快照广播流(parentSessionId -> 装载状态)。
+  @override
+  Stream<Map<String, SubagentCatalogState>> get catalogs =>
       _catalogsController.stream;
 
+  /// 后代聚合广播流(注入摘要流后每快照一发)。
+  @override
+  Stream<Map<String, SubagentDescendants>> get descendants =>
+      _descendantsController.stream;
+
+  /// 当前后代聚合快照。
+  @override
+  Map<String, SubagentDescendants> get currentDescendants => _descendants;
+
+  /// 会话摘要镜像(行内标题/指标读取用;未注入摘要流为空表)。
+  @override
+  SessionSummary? summaryFor(String sessionId) => _summariesById[sessionId];
+
   /// 当前目录快照(未装载为 null)。
-  SubagentListValue? catalogFor(String parentSessionId) =>
+  @override
+  SubagentCatalogState? catalogFor(String parentSessionId) =>
       _catalogs[parentSessionId];
 
   /// 取(或建)某子会话的只读日志。
+  @override
   SubagentTranscript transcriptFor(String childSessionId) =>
       _transcripts.putIfAbsent(
           childSessionId, () => SubagentTranscript(childSessionId));
 
-  /// 拉取(或命中缓存)某 parent 的直接 child 目录。缓存到下次失效
-  /// (代际翻转 / 父会话状态翻转 / invalidateChildren / force)。
-  Future<SubagentListValue> listChildren(String parentSessionId,
+  /// 拉取(或命中缓存)某 parent 的直接 child 目录。
+  ///
+  /// 缓存命中即返回 ready 快照([force] 跳过);未命中/force 走 RPC 并推进
+  /// loading→ready/error 状态机。**单飞**:同一 parent 并发刷新共享一次往返
+  /// (对齐 web catalogInflight)。错误保留旧 entries,由调用方决定重试。
+  @override
+  Future<SubagentCatalogState> listChildren(String parentSessionId,
       {bool force = false}) async {
-    if (!force && _catalogs.containsKey(parentSessionId)) {
+    // 单飞检查先行:loading 态已写入缓存表,后到者必须共享在飞往返
+    // 而不是把 loading 快照当命中结果返回。
+    if (!force && _catalogInflight.containsKey(parentSessionId)) {
+      await _catalogInflight[parentSessionId];
       return _catalogs[parentSessionId]!;
     }
-    final value = await api.call(
-      RpcMethods.subagentList,
-      <String, dynamic>{'parentSessionId': parentSessionId},
-      parse: SubagentListValue.fromJson,
+    if (!force &&
+        _catalogs.containsKey(parentSessionId) &&
+        _catalogs[parentSessionId]!.phase != SubagentCatalogPhase.error &&
+        _catalogs[parentSessionId]!.phase != SubagentCatalogPhase.loading) {
+      return _catalogs[parentSessionId]!;
+    }
+    final previous = _catalogs[parentSessionId];
+    _catalogs[parentSessionId] = SubagentCatalogState(
+      entries: previous?.entries ?? const <SubagentListEntry>[],
+      parentAvailable: previous?.parentAvailable ?? false,
+      phase: SubagentCatalogPhase.loading,
     );
-    _catalogs[parentSessionId] = value;
     _emitCatalogs();
-    return value;
+    final operation = _fetchCatalog(parentSessionId);
+    _catalogInflight[parentSessionId] = operation;
+    try {
+      await operation;
+    } finally {
+      _catalogInflight.remove(parentSessionId);
+      // 在飞响应早于触发 stale 的帧:settle 后补一拉才能收敛到最新。
+      if (_catalogStale.remove(parentSessionId)) {
+        unawaited(listChildren(parentSessionId, force: true));
+      }
+    }
+    return _catalogs[parentSessionId]!;
   }
 
-  /// 显式失效某 parent 的目录缓存(prompt/interrupt 后 activity 可能翻转)。
-  void invalidateChildren(String parentSessionId) {
-    if (_catalogs.remove(parentSessionId) != null) {
-      _emitCatalogs();
+  Future<void> _fetchCatalog(String parentSessionId) async {
+    try {
+      final value = await api.call(
+        RpcMethods.subagentList,
+        <String, dynamic>{'parentSessionId': parentSessionId},
+        parse: SubagentListValue.fromJson,
+      );
+      _catalogs[parentSessionId] = SubagentCatalogState(
+        entries: value.entries,
+        parentAvailable: value.parentAvailable,
+        phase: SubagentCatalogPhase.ready,
+      );
+    } on Object catch (e) {
+      // 错误保留旧 entries(UI 旧数据可用 + 可重试;对齐 web error 态)。
+      final previous = _catalogs[parentSessionId];
+      _catalogs[parentSessionId] = SubagentCatalogState(
+        entries: previous?.entries ?? const <SubagentListEntry>[],
+        parentAvailable: previous?.parentAvailable ?? false,
+        phase: SubagentCatalogPhase.error,
+        error: e,
+      );
     }
+    _emitCatalogs();
   }
+
+  /// 显式重拉某 parent 的目录(prompt/interrupt 后 activity 可能翻转;host
+  /// 帧行内维护已覆盖常规路径,此方法留作 UI 主动刷新入口)。
+  @override
+  Future<void> invalidateChildren(String parentSessionId) =>
+      listChildren(parentSessionId, force: true);
 
   /// 装载子会话 transcript(subagent.history 分页取完;重复调用幂等,靠 seq 去重)。
   /// [mode] 来自目录行('one-shot'|'continuable'),store 不假设。
   /// 读子会话 transcript**尾页**(默认 50 条;性能契约对齐 loadHistory:
   /// 打开即全量拉取是隐性 DoS,更早走 [loadOlderTranscript])。
+  @override
   Future<List<SessionEvent>> readTranscript(
     String parentSessionId,
     String childSessionId, {
@@ -192,6 +386,7 @@ class SubagentStore {
   }
 
   /// 向前补一页(幂等:无更早时 no-op)。
+  @override
   Future<List<SessionEvent>> loadOlderTranscript(
     String parentSessionId,
     String childSessionId, {
@@ -233,6 +428,7 @@ class SubagentStore {
 
   /// 续聊:mode 恒 'continuable';仅当目录行 parentAvailable==true 且 child 非
   /// one-shot/非运行中时 UI 才暴露入口(store 不复查,服务端仍权威)。
+  @override
   Future<SubagentPromptValue> promptChild(
     String parentSessionId,
     String childSessionId,
@@ -256,6 +452,7 @@ class SubagentStore {
   }
 
   /// 中断运行中的可继续子会话。
+  @override
   Future<SubagentInterruptValue> interruptChild(
           String parentSessionId, String childSessionId) =>
       api.call(
@@ -271,7 +468,32 @@ class SubagentStore {
   void _emitCatalogs() {
     if (!_catalogsController.isClosed) {
       _catalogsController
-          .add(Map<String, SubagentListValue>.unmodifiable(_catalogs));
+          .add(Map<String, SubagentCatalogState>.unmodifiable(_catalogs));
+    }
+  }
+
+  void _onSummaries(List<SessionSummary> summaries) {
+    if (_disposed) return;
+    _summariesById
+      ..clear()
+      ..addAll({for (final s in summaries) s.sessionId: s});
+    final next = indexSubagentDescendants(summaries);
+    // 等值不重发(摘要流高频:每个投影帧/状态帧都整表发)。
+    var changed = next.length != _descendants.length;
+    if (!changed) {
+      for (final e in next.entries) {
+        final old = _descendants[e.key];
+        if (old == null || old.count != e.value.count || old.runningCount != e.value.runningCount) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      _descendants = next;
+      if (!_descendantsController.isClosed) _descendantsController.add(next);
+    } else {
+      _descendants = next;
     }
   }
 
@@ -294,21 +516,141 @@ class SubagentStore {
   }
 
   void _onHostFrame(HostFrame frame) {
-    // 父会话运行状态翻转 → 其目录缓存失效(下次 listChildren 重取新 parentAvailable)。
-    if (frame is HostFrameHostSessionStatus &&
-        _catalogs.containsKey(frame.sessionId)) {
-      invalidateChildren(frame.sessionId);
+    switch (frame) {
+      case HostFrameHostSessionStatus():
+        // child 运行翻转 → 所有已装目录的对应行**行内**翻转(零 RPC;
+        // parentAvailable 只能重拉得知,常规路径由 added/removed 兜住)。
+        _applyActivity(frame.sessionId, frame.running);
+      case HostFrameHostSessionAdded():
+        if (frame.origin == 'subagent' && frame.parentSessionId != null) {
+          // 孙出生:① 子行(所有含该行的目录)hasChildren 正提示 —— 即使
+          // 目录快照还没带上它,展开箭头先出现(web markCatalogParent
+          // Expandable);② 防抖重拉「子」的目录,新孙行可见。
+          _markExpandable(frame.parentSessionId!);
+          _scheduleCatalogRefresh(frame.parentSessionId!);
+        }
+      case HostFrameHostSessionRemoved():
+        // 行内折 activity(web:Activation 脱离≠删除 durable 子代,行保留)。
+        _applyActivity(frame.sessionId, false);
+        // 被移除的会话不再可能是任何目录的投递属主:parentAvailable 即时
+        // 置 false(不等重拉 —— 关着的目录永远不会重拉)。
+        final owned = _catalogs[frame.sessionId];
+        if (owned != null && owned.parentAvailable) {
+          _catalogs[frame.sessionId] = SubagentCatalogState(
+            entries: owned.entries,
+            parentAvailable: false,
+            phase: owned.phase,
+            error: owned.error,
+          );
+          _emitCatalogs();
+        }
+      default:
+        break;
     }
+  }
+
+  /// 行内翻转某 child 在所有已装目录里的 activity(以及摘要镜像)。
+  void _applyActivity(String sessionId, bool running) {
+    final activity = running ? 'running' : 'inactive';
+    var changed = false;
+    for (final key in _catalogs.keys.toList()) {
+      final catalog = _catalogs[key]!;
+      var rowChanged = false;
+      final entries = <SubagentListEntry>[];
+      for (final e in catalog.entries) {
+        if (e is SubagentListEntryChild &&
+            e.id == sessionId &&
+            e.activity != activity) {
+          entries.add(SubagentListEntryChild(
+            id: e.id,
+            mode: e.mode,
+            activity: activity,
+            hasChildren: e.hasChildren,
+            label: e.label,
+          ));
+          rowChanged = true;
+        } else {
+          entries.add(e);
+        }
+      }
+      if (rowChanged) {
+        _catalogs[key] = SubagentCatalogState(
+          entries: entries,
+          parentAvailable: catalog.parentAvailable,
+          phase: catalog.phase,
+          error: catalog.error,
+        );
+        changed = true;
+      }
+    }
+    if (changed) _emitCatalogs();
+  }
+
+  /// 把所有已装目录里 id==[childSessionId] 的行标成可展开(hasChildren=true)。
+  void _markExpandable(String childSessionId) {
+    var changed = false;
+    for (final key in _catalogs.keys.toList()) {
+      final catalog = _catalogs[key]!;
+      var rowChanged = false;
+      final entries = <SubagentListEntry>[];
+      for (final e in catalog.entries) {
+        if (e is SubagentListEntryChild &&
+            e.id == childSessionId &&
+            !e.hasChildren) {
+          entries.add(SubagentListEntryChild(
+            id: e.id,
+            mode: e.mode,
+            activity: e.activity,
+            hasChildren: true,
+            label: e.label,
+          ));
+          rowChanged = true;
+        } else {
+          entries.add(e);
+        }
+      }
+      if (rowChanged) {
+        _catalogs[key] = SubagentCatalogState(
+          entries: entries,
+          parentAvailable: catalog.parentAvailable,
+          phase: catalog.phase,
+          error: catalog.error,
+        );
+        changed = true;
+      }
+    }
+    if (changed) _emitCatalogs();
+  }
+
+  /// 防抖重拉某 parent 的目录(50ms;在飞响应早于触发帧时标 stale,
+  /// settle 后由 listChildren 的 finally 补拉 —— 对齐 web scheduleCatalogRefresh)。
+  void _scheduleCatalogRefresh(String parentSessionId) {
+    if (!_catalogs.containsKey(parentSessionId)) return;
+    if (_catalogDebounce.containsKey(parentSessionId)) return;
+    _catalogDebounce[parentSessionId] = Timer(const Duration(milliseconds: 50), () {
+      _catalogDebounce.remove(parentSessionId);
+      if (_catalogInflight.containsKey(parentSessionId)) {
+        _catalogStale.add(parentSessionId);
+        return;
+      }
+      unawaited(listChildren(parentSessionId, force: true));
+    });
   }
 
   Future<void> dispose() async {
     _disposed = true;
+    for (final t in _catalogDebounce.values) {
+      t.cancel();
+    }
+    _catalogDebounce.clear();
     await _snapshotsSub?.cancel();
     await _muxSub?.cancel();
     await _hostSub?.cancel();
+    await _summariesSub?.cancel();
     for (final t in _transcripts.values) {
       await t.dispose();
     }
     await _catalogsController.close();
+    await _descendantsController.close();
   }
 }

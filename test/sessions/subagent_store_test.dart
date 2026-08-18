@@ -2,6 +2,7 @@
 // list 缓存与失效(代际翻转/父会话状态翻转)、history 翻页装载 + seq 去重、
 // prompt/interrupt 信封、错误码传播(subagent-parent-unavailable /
 // subagent-not-found / subagent-not-resumable)与文案映射。
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -321,19 +322,37 @@ void main() {
     expect(host.subagentListCalls, 2); // 重连=全量重取
   });
 
-  test('父会话运行状态翻转 → 其目录缓存失效', () async {
+  test('host/session-status → child 行 activity 行内翻转(零 RPC,目录不失效)', () async {
     host.listEntries = [childEntry('child-1', 'continuable', 'inactive', label: '子代理一')];
     await ready();
     await store.listChildren('parent-1');
-    expect(store.catalogFor('parent-1'), isNotNull);
+    final before = host.subagentListCalls;
 
     host.sendHostFrame({
       'type': 'host/session-status',
-      'sessionId': 'parent-1',
+      'sessionId': 'child-1',
       'running': true,
     });
     await Future<void>.delayed(const Duration(milliseconds: 200));
-    expect(store.catalogFor('parent-1'), isNull);
+    final catalog = store.catalogFor('parent-1');
+    expect(catalog, isNotNull); // 不失效
+    expect(catalog!.phase, SubagentCatalogPhase.ready);
+    final row = catalog.entries.single as SubagentListEntryChild;
+    expect(row.activity, 'running'); // 行内翻转
+    expect(host.subagentListCalls, before); // 零 RPC
+
+    // 翻回 inactive 同样行内。
+    host.sendHostFrame({
+      'type': 'host/session-status',
+      'sessionId': 'child-1',
+      'running': false,
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(
+      (store.catalogFor('parent-1')!.entries.single as SubagentListEntryChild)
+          .activity,
+      'inactive',
+    );
   });
 
   test('list 保留 diagnostic 行:可读但标记不可用;无 label 回退 id', () async {
@@ -432,18 +451,148 @@ void main() {
     expect(payload['mode'], 'continuable');
   });
 
-  test('list 错误码传播:subagent-parent-unavailable + 文案映射', () async {
+  test('list 错误折叠进 error 态(不抛);重试恢复 ready', () async {
     host.nextListError = 'subagent-parent-unavailable';
     await ready();
-    await expectLater(
+    final state = await store.listChildren('parent-1');
+    expect(state.phase, SubagentCatalogPhase.error);
+    // 错误对象保留在 state 上(UI 呈现可读文案)。
+    expect(subagentErrorMessage(state.error!), contains('父会话不可用'));
+
+    // 重试:错误态下缓存不再命中,恢复 ready。
+    final ok = await store.listChildren('parent-1');
+    expect(ok.phase, SubagentCatalogPhase.ready);
+  });
+
+  test('错误保留旧 entries(刷新失败旧数据仍可用)', () async {
+    host.listEntries = [childEntry('child-1', 'one-shot', 'inactive', label: '旧数据')];
+    await ready();
+    await store.listChildren('parent-1');
+    host.nextListError = 'internal';
+    final state = await store.listChildren('parent-1', force: true);
+    expect(state.phase, SubagentCatalogPhase.error);
+    expect(state.entries, hasLength(1)); // 旧 entries 保留
+    expect((state.entries.single as SubagentListEntryChild).label, '旧数据');
+  });
+
+  test('单飞:并发两次未缓存刷新共享一次往返', () async {
+    host.listEntries = [childEntry('child-1', 'one-shot', 'inactive')];
+    await ready();
+    final results = await Future.wait([
       store.listChildren('parent-1'),
-      throwsA(isA<RpcBusinessError>().having((e) => e.error, 'error',
-          isA<RpcErrorSubagentParentUnavailable>())),
-    );
-    // UI 文案映射(纯 Dart 助手)。
-    const err = RpcErrorSubagentParentUnavailable(
-        message: 'parent gone', details: <String, dynamic>{});
-    expect(subagentErrorMessage(const RpcBusinessError(err)), contains('父会话不可用'));
+      store.listChildren('parent-1'),
+    ]);
+    expect(host.subagentListCalls, 1);
+    expect(identical(results[0], results[1]), isTrue);
+  });
+
+  test('host/session-added(origin=subagent)→ hasChildren 正提示 + 防抖重拉子目录', () async {
+    host.listEntries = [childEntry('child-1', 'continuable', 'inactive', label: '子代理一')];
+    await ready();
+    await store.listChildren('parent-1');
+    // 子目录(child-1)拉过一次(模拟展开)。
+    host.listEntries = [childEntry('grand-1', 'one-shot', 'inactive')];
+    await store.listChildren('child-1');
+    final before = host.subagentListCalls;
+
+    host.sendHostFrame({
+      'type': 'host/session-added',
+      'sessionId': 'grand-2',
+      'blank': false,
+      'parentSessionId': 'child-1',
+      'origin': 'subagent',
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    // ① parent-1 目录里 child-1 行获得展开提示。
+    final row =
+        store.catalogFor('parent-1')!.entries.single as SubagentListEntryChild;
+    expect(row.hasChildren, isTrue);
+    // ② 防抖重拉 child-1 的目录(新孙行可见)。
+    expect(host.subagentListCalls, greaterThan(before));
+    expect(host.listRequests.last['parentSessionId'], 'child-1');
+  });
+
+  test('host/session-removed → 行内折 activity + owner 目录 parentAvailable=false', () async {
+    host.listEntries = [childEntry('child-1', 'continuable', 'running', label: '子代理一')];
+    await ready();
+    await store.listChildren('parent-1');
+    // child-1 自己也是目录 owner(展开过),parentAvailable=true。
+    host.listEntries = [];
+    await store.listChildren('child-1');
+    expect(store.catalogFor('child-1')!.parentAvailable, isTrue);
+
+    host.sendHostFrame({'type': 'host/session-removed', 'sessionId': 'child-1'});
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    // ① parent-1 目录里行折叠为 inactive(行保留,不删)。
+    final row =
+        store.catalogFor('parent-1')!.entries.single as SubagentListEntryChild;
+    expect(row.activity, 'inactive');
+    // ② child-1 作为 owner 的目录 parentAvailable 即时置 false(不重拉)。
+    final owned = store.catalogFor('child-1');
+    expect(owned, isNotNull);
+    expect(owned!.parentAvailable, isFalse);
+  });
+
+  test('后代聚合:不间断血统链向上累计,fork 断链,等值不重发', () async {
+    final summaries = StreamController<List<SessionSummary>>.broadcast();
+    final aggStore = SubagentStore(
+        api: api, connection: controller, summaries: summaries.stream);
+    addTearDown(() async {
+      await summaries.close();
+      await aggStore.dispose();
+    });
+    await ready();
+
+    var emissions = 0;
+    final sub = aggStore.descendants.listen((_) => emissions += 1);
+    addTearDown(() => sub.cancel());
+
+    SessionSummary summary(String id, String? parent, String? origin,
+            {bool running = false}) =>
+        SessionSummary(
+          sessionId: id,
+          updatedAt: 1,
+          running: running,
+          blank: false,
+          parentSessionId: parent,
+          origin: origin,
+        );
+
+    // root ← child(subagent, running) ← grand(subagent);fork1 是 root 的普通 fork。
+    summaries.add([
+      summary('root', null, null),
+      summary('child', 'root', 'subagent', running: true),
+      summary('grand', 'child', 'subagent'),
+      summary('fork1', 'root', null),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(aggStore.currentDescendants['root']!.count, 2); // child+grand
+    expect(aggStore.currentDescendants['root']!.runningCount, 1);
+    expect(aggStore.currentDescendants['child']!.count, 1); // grand
+    expect(aggStore.currentDescendants['fork1'], isNull); // fork 无 subagent 子代
+
+    // 等值重发不重复广播。
+    summaries.add([
+      summary('root', null, null),
+      summary('child', 'root', 'subagent', running: true),
+      summary('grand', 'child', 'subagent'),
+      summary('fork1', 'root', null),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(emissions, 1);
+
+    // running 翻转 → 计数更新 + 重发。
+    summaries.add([
+      summary('root', null, null),
+      summary('child', 'root', 'subagent', running: false),
+      summary('grand', 'child', 'subagent'),
+      summary('fork1', 'root', null),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(aggStore.currentDescendants['root']!.runningCount, 0);
+    expect(emissions, 2);
   });
 
   test('history 错误码传播:subagent-not-found', () async {

@@ -9,8 +9,9 @@
 //   会话开始后只读)—— 对齐 web conversation.hero.workspaceRow
 // - 多行输入:移动端回车换行(全按钮化,无 busyEnter 快捷键依赖);
 //   桌面保留 Enter 发送(W1 语义延续)
-// - 底部工具行:左「+」添加命令 / 添加图片 / 权限切换 chip;右模型切换
-//   chip / 发送 / 停止 —— 对齐 web InputBar.row(tools | trailing)
+// - 底部工具行:左 terminal 图标(命令与技能菜单唯一入口,图标取自原
+//   标题栏 terminal;用户诉求:全 app 只保留这一个命令入口)/ 添加图片 /
+//   权限切换 chip;右模型切换 chip / 发送 / 停止 —— 对齐 web InputBar.row
 // - 斜杠命令检测:文本以 '/' 开头 → 输入框上方出现命令菜单占位(本体由 W2-D
 //   经 commandMenu 注入;未注入时显示内置占位条);query 经 onCommandIntent 上抛
 // - 图片附件栏占位:W2-C 的 AttachmentRail 由集成方经 attachmentsSlot 注入;
@@ -45,6 +46,7 @@ class UpgradeComposer extends StatefulWidget {
     this.commandMenu,
     this.attachmentsSlot,
     this.controller,
+    this.focusNode,
     this.hintText = '输入消息',
     // ── web InputBar 对齐(上方行:工作区 + 工作模式) ──
     this.workspaceLabel,
@@ -88,8 +90,13 @@ class UpgradeComposer extends StatefulWidget {
   /// W2-C AttachmentRail(集成方注入;显示在输入框上方、命令菜单下方)。
   final Widget? attachmentsSlot;
 
-  /// 可选外部控制器(W2-D 选中命令后插入文本用;null 则内部自建并自管生命周期)。
+  /// 可选外部控制器(命令菜单选中命令/skill 后插入 '/name ' 文本用;
+  /// null 则内部自建并自管生命周期)。
   final TextEditingController? controller;
+
+  /// 可选外部焦点节点(集成方插入文本后 requestFocus 拉起键盘续输参数;
+  /// null 则内部自建并自管生命周期)。与 [controller] 同款注入模式。
+  final FocusNode? focusNode;
 
   final String hintText;
 
@@ -112,7 +119,8 @@ class UpgradeComposer extends StatefulWidget {
 
   // ── 底部工具行(web InputBar.row 对齐) ──
 
-  /// 「+」添加命令(web input.commands → 命令/技能/子智能体菜单)。
+  /// 打开命令与技能菜单(web input.commands → 命令/技能菜单;全 app 唯一
+  /// 入口,terminal 图标)。
   final VoidCallback? onAddCommand;
 
   /// 当前访问模式/权限名(null = 集成方无命令域 → 不渲染 chip)。
@@ -134,14 +142,14 @@ class UpgradeComposer extends StatefulWidget {
 class _UpgradeComposerState extends State<UpgradeComposer> {
   late final TextEditingController _controller =
       widget.controller ?? TextEditingController();
-  final _focus = FocusNode();
+  late final FocusNode _focus = widget.focusNode ?? FocusNode();
   String? _error;
   bool _sending = false;
   String? _lastEmittedQuery;
 
   @override
   void dispose() {
-    _focus.dispose();
+    if (widget.focusNode == null) _focus.dispose();
     if (widget.controller == null) _controller.dispose();
     super.dispose();
   }
@@ -297,8 +305,8 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
             ),
           ),
           const SizedBox(height: 8),
-          // web 对齐:底部工具行(InputBar.row)—— 左侧「+」命令/图片/权限,
-          // 右侧模型 + 发送/停止。
+          // web 对齐:底部工具行(InputBar.row)—— 左侧 terminal 命令按钮/
+          // 图片/权限,右侧模型 + 发送/停止。
           _buildToolbarRow(theme, stopEnabled),
           if (_error != null)
             Semantics(
@@ -374,7 +382,7 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
     );
   }
 
-  /// 底部工具行:左「+」命令/图片/权限,右模型/发送/停止(web InputBar.row)。
+  /// 底部工具行:左 terminal 命令/图片/权限,右模型/发送/停止(web InputBar.row)。
   ///
   /// 窄屏降级(用户诉求:宽度不足时只显示图标,绝不让文本穿透按钮/Row 溢出):
   /// 余量 ≥220 → chip 带文案;
@@ -403,7 +411,9 @@ class _UpgradeComposerState extends State<UpgradeComposer> {
               _ToolIconButton(
                 key: const ValueKey('composer-add-command'),
                 tooltip: '命令',
-                icon: Icons.add,
+                // 命令与技能菜单唯一入口;图标沿用原标题栏 terminal
+                // (用户诉求:移除标题栏入口,只留 composer 这一个)。
+                icon: Icons.terminal,
                 onTap: widget.onAddCommand,
               ),
             if (widget.onPickImages != null) ...[
@@ -666,7 +676,7 @@ class _ComposerChip extends StatelessWidget {
   }
 }
 
-/// 底部工具行的方形图标按钮(「+」命令 / 添加图片);48dp 触控区
+/// 底部工具行的方形图标按钮(terminal 命令 / 添加图片);48dp 触控区
 /// (移动可用性硬性:≥48dp,同发送/停止)。
 class _ToolIconButton extends StatelessWidget {
   const _ToolIconButton({
@@ -713,5 +723,6 @@ class _ToolIconButton extends StatelessWidget {
 //                                     的 AttachmentRail 回填展示。
 // 摆放位置:chat_screen.dart _MessagePane 中 _Composer(vm:vm, controller:...) 处,
 // 替换为 UpgradeComposer(running: <选中会话 running>, canSend: vm.canSend, ...)。
-// W2-D 需要向输入框插入命令文本(选中 '/name' 后回填):集成方持有并传入
-// controller 参数即可直接 controller.text = ... 注入。
+// 命令菜单需要向输入框插入命令文本(选中 skill/leadingInput 命令后回填
+// '/name '):集成方持有并传入 controller + focusNode,即可直接
+// controller.text = ... 注入并 requestFocus 拉起键盘续输参数。

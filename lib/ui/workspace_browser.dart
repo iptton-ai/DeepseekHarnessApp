@@ -13,7 +13,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:singleman/sessions/session_attention_store.dart';
 import 'package:singleman/sessions/workspace_store.dart';
+import 'package:singleman/ui/session_state_dot.dart';
 import 'package:singleman/wire/generated/wire_generated.dart';
 
 /// 动作回调束(主会话注入)。
@@ -144,9 +146,11 @@ class WorkspaceBrowser extends StatefulWidget {
     required this.callbacks,
     this.query = '',
     this.selectedSessionId,
+    this.attention,
     this.initialExpandedCount = 5,
     this.groupMode = WorkspaceGroupMode.workspace,
     this.orderMode = WorkspaceOrderMode.updated,
+    this.loading = false,
   });
 
   final WorkspaceStoreView store;
@@ -160,6 +164,9 @@ class WorkspaceBrowser extends StatefulWidget {
   final String query;
   final String? selectedSessionId;
 
+  /// 会话行状态域(M5;null = 回退仅 running 动画)。
+  final SessionAttentionStore? attention;
+
   /// 每组默认显示条数,超出折叠为「展开其余」。
   final int initialExpandedCount;
 
@@ -168,6 +175,11 @@ class WorkspaceBrowser extends StatefulWidget {
 
   /// 排序方式:最近更新(updatedAt 倒序)/ 手动(注册表顺序)。
   final WorkspaceOrderMode orderMode;
+
+  /// 连接装载中(切主机整代重装 / 首启连接窗口)。列表尚无任何数据时
+  /// 显示加载态,而非误导性的「新建会话」空态;已有数据(同主机重连)
+  /// 则照常显示旧列表,不闪空。
+  final bool loading;
 
   @override
   State<WorkspaceBrowser> createState() => _WorkspaceBrowserState();
@@ -241,7 +253,9 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
             ], _kFlatOrderKey)
           : _applyOrder(visible, _kFlatOrderKey); // updated:updatedAt 倒序。
       if (rows.isEmpty && _workspaces.isEmpty) {
-        return _newSessionFallback();
+        return widget.loading
+            ? const SessionListLoading()
+            : _newSessionFallback();
       }
       return ListView.builder(
         padding: const EdgeInsets.symmetric(vertical: 4),
@@ -249,6 +263,12 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
         itemBuilder: (context, i) =>
             _sessionRow(rows[i], accountKey: _kFlatOrderKey),
       );
+    }
+
+    // 装载窗口(切主机/首启连接中,尚无任何数据):整块给加载态 ——
+    // 否则空簿会先渲染「未分组」兜底组头,把装载期伪装成空会话状态。
+    if (widget.loading && _workspaces.isEmpty && ungrouped.isEmpty) {
+      return const SessionListLoading();
     }
 
     // 分组描述符(组头/会话行/展开钮),ListView.builder 虚拟化 ——
@@ -603,14 +623,18 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
       contentPadding: const EdgeInsets.only(left: 24, right: 8),
       selected: selected,
       selectedTileColor: colors.primary.withValues(alpha: .12),
-      // 会话名不配专门图标(复刻 web 行:标题+相对时间);仅正在运行的
-      // 会话在保留的 18dp 前置槽内显示 loading 小动画,标题左缘保持对齐。
+      // 会话名不配专门图标(复刻 web 行:标题+相对时间);18dp 前置槽留给
+      // 状态点:running 像素追逐(非 loading 环)/待输入琥珀/错误红/
+      // 未读绿(web StateDot 语义;标题左缘保持对齐)。
       leading: SizedBox(
         width: 18,
         height: 18,
-        child: s.running
-            ? const Center(child: SessionRunningIndicator())
-            : null,
+        child: Center(
+          child: SessionStateDot(
+            status: widget.attention?.statusOf(s.sessionId) ??
+                (s.running ? SessionRowStatus.running : SessionRowStatus.idle),
+          ),
+        ),
       ),
       title: Text(
         sessionDisplayTitle(s),
@@ -829,6 +853,34 @@ class _WorkspaceBrowserState extends State<WorkspaceBrowser> {
   }
 }
 
+/// 会话列表装载态:切主机整代重装 / 首启连接窗口里,列表尚无任何数据
+/// 时的过渡 UI(侧栏分组视图与扁平回退列表共用)。
+class SessionListLoading extends StatelessWidget {
+  const SessionListLoading({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '正在加载会话…',
+            style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 会话相对时间标签(复刻 web relativeTime 桶 + 紧凑文案,行内无「前」
 /// 后缀 —— 「前」只出现在 hover 卡的 ago 模板;updatedAt 为 epoch 毫秒):
 /// 刚刚(<1min) / N分钟(<1h) / N小时(<1d) / N天(<30d) / N个月(<365d) / N年。
@@ -866,25 +918,6 @@ String sessionDisplayTitle(SessionSummary s) {
     if (base.isNotEmpty) return base;
   }
   return s.sessionId;
-}
-
-/// 会话行 running 小动画(替代原状态图标;仅正在运行的会话显示)。
-class SessionRunningIndicator extends StatelessWidget {
-  const SessionRunningIndicator({super.key, this.size = 14});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CircularProgressIndicator(
-        strokeWidth: 2,
-        color: Theme.of(context).colorScheme.tertiary,
-      ),
-    );
-  }
 }
 
 /// 手动排序的会话行:长按拖起(LongPressDraggable)+ 同账号行间投放

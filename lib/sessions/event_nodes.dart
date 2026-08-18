@@ -54,22 +54,33 @@ import 'package:singleman/wire/generated/wire_generated.dart';
 /// 工具卡状态(由渲染意图/数据判定:运行/成功/失败/中断)。
 enum ToolStatus { running, success, failed, interrupted }
 
-/// 会话流节点(sealed)。每个节点携带来源事件的 seq 与原始类型名。
+/// 会话流节点(sealed)。每个节点携带来源事件的 seq 与原始类型名,
+/// 以及来源事件的宿主时间戳(A2 时间基线;epoch ms,可空防御)。
 sealed class ChatNode {
-  const ChatNode({required this.seq, required this.type});
+  const ChatNode({required this.seq, required this.type, this.time});
   final int seq;
   final String type;
+
+  /// 来源事件 SessionEvent.time(epoch ms;历史旧档/合成节点可能缺失)。
+  final double? time;
 }
 
-/// 用户气泡(右对齐;agent.inject 的合成上下文被过滤,对齐 chat_view_model)。
+/// 用户气泡(右对齐)。[steering] = 运行中被接纳的插话(A6:web
+/// SteeringMessageNode 同款语义,经 next-step inbox claimed 折叠判定),
+/// UI 以「插话」标记区分普通用户消息。
 class ChatNodeUser extends ChatNode {
   const ChatNodeUser({
     required super.seq,
     required super.type,
     required this.text,
     this.images,
+    this.steering = false,
+    super.time,
   });
   final String text;
+
+  /// 是否为运行中被接纳的插话(web: admitted steering)。
+  final bool steering;
 
   /// 图片附件引用(本部署无视觉模型,线上暂无真实样本;形状防御式提取,见
   /// _imageRefs —— fixture 验收,有视觉模型后活体复验)。
@@ -85,10 +96,20 @@ class ChatNodeAssistant extends ChatNode {
     required this.text,
     this.images,
     this.streaming = false,
+    super.time,
+    this.runMs,
+    this.ttftMs,
+    this.tokensPerSecond,
   });
   final String text;
   final List<ImageAttachmentRef>? images;
   final bool streaming;
+
+  /// 轮级耗时指标(web turn-tail → MessageIconActions「Ran for/TTFT/tok-s」
+  /// 的等价物;挂在轮末最后一条定稿助手消息上,仅完成轮有值)。
+  final double? runMs;
+  final double? ttftMs;
+  final double? tokensPerSecond;
 }
 
 /// think 折叠块(默认收起,点开显示全文;streaming 时 UI 在标题行滚动
@@ -99,6 +120,7 @@ class ChatNodeThink extends ChatNode {
     required super.type,
     required this.text,
     this.streaming = false,
+    super.time,
   });
   final String text;
   final bool streaming;
@@ -118,6 +140,10 @@ class ChatNodeTool extends ChatNode {
     this.status = ToolStatus.running,
     this.callSeq,
     this.resultSeq,
+    super.time,
+    this.callTime,
+    this.resultTime,
+    this.producedPaths = const <String>[],
   });
   final String toolName;
   final String? callId;
@@ -130,6 +156,16 @@ class ChatNodeTool extends ChatNode {
   final ToolStatus status;
   final int? callSeq;
   final int? resultSeq;
+
+  /// call 事件时间(epoch ms;A4 工具耗时 = resultTime-callTime)。
+  final double? callTime;
+
+  /// result 事件时间(未结算为 null;运行中卡的实时耗时由 UI 用 now 补)。
+  final double? resultTime;
+
+  /// 本调用产出/修改的文件路径(web ui-deliverables 语义:call view 的
+  /// locations,card=diff 或 generic+kind=edit;实时帧有 view 才非空)。
+  final List<String> producedPaths;
 }
 
 /// todo/write 计划快照(紧凑状态计数卡)。
@@ -138,6 +174,7 @@ class ChatNodeTodo extends ChatNode {
     required super.seq,
     required super.type,
     required this.items,
+    super.time,
   });
   final List<TodoItem> items;
   int get done => items.where((i) => i.done).length;
@@ -159,6 +196,7 @@ class ChatNodeCompaction extends ChatNode {
     required this.kind,
     this.summary,
     this.messages,
+    super.time,
   });
   final String kind; // start | end | summary | prune
   final String? summary;
@@ -173,6 +211,7 @@ class ChatNodeRetry extends ChatNode {
     this.reason,
     this.attempt,
     this.maxRetries,
+    super.time,
   });
   final String? reason;
   final int? attempt;
@@ -185,6 +224,7 @@ class ChatNodeError extends ChatNode {
     required super.seq,
     required super.type,
     required this.message,
+    super.time,
   });
   final String message;
 }
@@ -195,8 +235,123 @@ class ChatNodeUnknown extends ChatNode {
     required super.seq,
     required super.type,
     required this.data,
+    super.time,
   });
   final dynamic data;
+}
+
+/// 注入上下文行(A5:web ContextInjectionRow 对齐)。source.kind != 'user'
+/// 的 user/message 不再一刀切过滤 —— 以左侧低调折叠行交代注入痕迹,
+/// 头部 = 角色词 + 生产者标签,展开显示内容正文。
+class ChatNodeContextRow extends ChatNode {
+  const ChatNodeContextRow({
+    required super.seq,
+    required super.type,
+    required this.provenanceLabel,
+    this.recall = false,
+    this.summary,
+    this.text,
+    super.time,
+  });
+
+  /// 生产者标签(web contextProvenance:agent-instructions 取 changes[].path、
+  /// plugin 取 plugin id、skill-invocation 取 name、session-reference 取
+  /// references[].label,其余回退 source.kind)。
+  final String? provenanceLabel;
+
+  /// 是否为跨会话召回(web role='recall':「上下文召回」而非「上下文注入」)。
+  final bool recall;
+
+  /// 折叠行摘要(仅 notice form 携带 source.summary)。
+  final String? summary;
+
+  /// 内容正文(text 块拼接;展开显示)。
+  final String? text;
+}
+
+/// 斜杠命令卡(B1 换形式:command/run+done 聚合成单卡,web CommandNode)。
+class ChatNodeCommand extends ChatNode {
+  const ChatNodeCommand({
+    required super.seq,
+    required super.type,
+    required this.name,
+    this.args,
+    this.outcomeKind,
+    this.outcomeText,
+    this.done = false,
+    super.time,
+  });
+  final String? name;
+  final String? args;
+
+  /// 终态(command/done.data.kind):success | error | …;null = 运行中。
+  final String? outcomeKind;
+
+  /// 终态文本(command/done.data.text,如导出落盘路径)。
+  final String? outcomeText;
+  final bool done;
+}
+
+/// workflow 运行卡(A7:tool-workflow 四事件按 runId 聚合,web workflow-run)。
+class ChatNodeWorkflowRun extends ChatNode {
+  const ChatNodeWorkflowRun({
+    required super.seq,
+    required super.type,
+    required this.runId,
+    required this.name,
+    required this.status,
+    required this.phases,
+    super.time,
+  });
+  final String runId;
+  final String name;
+
+  /// running | completed | failed | cancelled | interrupted。
+  final String status;
+
+  /// 阶段分组(保持 agent-start 顺序;phase 缺席归「默认」组)。
+  final List<WorkflowPhase> phases;
+}
+
+class WorkflowPhase {
+  const WorkflowPhase({required this.key, required this.phase, required this.members});
+
+  /// web workflowPhaseKey:phase 为 null 时 'missing',否则 'value:len:phase'。
+  final String key;
+
+  /// 声明的阶段名(null = 未声明)。
+  final String? phase;
+  final List<WorkflowMember> members;
+}
+
+class WorkflowMember {
+  const WorkflowMember({
+    required this.seq,
+    required this.label,
+    required this.childId,
+    required this.status,
+  });
+  final int seq;
+  final String label;
+
+  /// 子会话 id(点击打开 transcript 用)。
+  final String childId;
+
+  /// running | completed | failed | cancelled | interrupted。
+  final String status;
+}
+
+/// 轮末产出文件行数据(A1:ProducedFilesRow 的数据节点)。
+class ChatNodeDeliverables extends ChatNode {
+  const ChatNodeDeliverables({
+    required super.seq,
+    required super.type,
+    required this.paths,
+    super.time,
+  });
+
+  /// 本轮产出/修改文件(首见序去重;web producedForClosing 同款)。
+  final List<String> paths;
 }
 
 /// 已知但不应直接暴露协议名的系统事件。
@@ -208,6 +363,7 @@ class ChatNodeNotice extends ChatNode {
     required this.title,
     this.detail,
     this.icon = 'info',
+    super.time,
   });
   final String title;
   final String? detail;
@@ -236,12 +392,54 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
   final result = <ChatNode>[];
   // 未配对 call 的占位:记录它在 result 中的下标,结果事件到达时回填合并。
   final pending = <_PendingCall>[];
+  // A6 steering 判定:next-step inbox 折叠(web inbox.ts applySplice 同款)。
+  final inbox = _NextStepInboxState();
+  // A2 轮级指标(turn-tail:runMs/ttftMs/tok-s),轮末回填到最后一条定稿
+  // 助手消息(web MessageIconActions「Ran for/TTFT/tok-s」对齐)。
+  final turnMetrics = _TurnMetrics();
+  // A1 轮末产出:本轮成功修改调用累计的 locations 路径(首见去重)。
+  var turnProduced = <String>[];
+  // B1 命令卡:command/run 的卡位(run+done 按 commandId 配对)。
+  final commandByRun = <String, _CommandSlot>{};
+  // A7 workflow 聚合:runId → 状态(run-start 锚定卡位,成员事件更新)。
+  final workflows = <String, _WorkflowState>{};
   for (final input in sorted) {
     final event = input.event;
     final view = input.view;
     if (event.type == 'assistant/chunk' && _chunkOf(event.data) != null) {
       continue; // 折叠态由 _foldChunks 统一产出。
     }
+    // A7:workflow 家族聚合成单卡,不再各发一条 notice(B1)。
+    if (_workflowEventOf(event) case final wf?) {
+      final st = workflows.putIfAbsent(
+        wf.runId,
+        () => _WorkflowState(
+          runId: wf.runId,
+          anchorSeq: event.seq,
+          time: event.time,
+        ),
+      );
+      st.apply(event, wf);
+      continue;
+    }
+    // A1:修改类调用的产出路径在轮边界结转(仅成功结果计入)。
+    if (event.type == 'turn/end') {
+      // A2 轮末回填:最后一条定稿助手消息带走本轮耗时指标。
+      turnMetrics.attachTo(result);
+      if (turnProduced.isNotEmpty) {
+        result.add(
+          ChatNodeDeliverables(
+            seq: event.seq,
+            type: 'turn/deliverables',
+            paths: turnProduced,
+            time: event.time,
+          ),
+        );
+        turnProduced = <String>[];
+      }
+    }
+    // A2 轮内记账:边界/首帧/定稿/用量喂给 turnMetrics。
+    turnMetrics.observe(event);
     final kind = _toolKind(event, view);
     if (kind == _ToolKind.call) {
       final node = _buildToolCall(event, view);
@@ -259,10 +457,18 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
       final idx = _matchPending(pending, node.callId);
       if (idx >= 0) {
         final p = pending.removeAt(idx);
-        result[p.index] = _mergeCallResult(
+        final merged = _mergeCallResult(
           result[p.index] as ChatNodeTool,
           node,
         );
+        result[p.index] = merged;
+        // web producedPaths:只有成功结算的修改意图才计入产出。
+        if (merged.status == ToolStatus.success &&
+            merged.producedPaths.isNotEmpty) {
+          for (final pth in merged.producedPaths) {
+            if (!turnProduced.contains(pth)) turnProduced.add(pth);
+          }
+        }
       } else {
         result.add(node); // 无配对结果的独立卡(按 view 判定状态)。
       }
@@ -281,19 +487,365 @@ List<ChatNode> extractNodes(List<EventNodeInput> inputs) {
         //(call 缺 turn 字段的防御形状也只能靠这里兜住)。
         _settlePending(pending, result, seq: event.seq);
       }
-      result.addAll(_nodesFor(event));
+      // A6:next-step inbox 折叠先于 user/message 判定(seq 序保证 splice
+      // 已在消息落位前发生 —— 与 web reader.previous 语义一致)。
+      if (event.type == 'agent/inbox/spliced') {
+        inbox.applySplice(event.data);
+        continue; // B1:web publication:'none',时间线无行。
+      }
+      // B1:命令卡配对(run 锚卡,done 回填终态)。
+      if (event.type == 'command/run' || event.type == 'command/done') {
+        final id = _commandIdOf(event.data);
+        if (id != null) {
+          final slot = commandByRun[id];
+          if (slot == null) {
+            // 首见(run,或孤立 done):锚定本事件 seq 占卡。
+            final node = _commandNodeFrom(event);
+            commandByRun[id] = _CommandSlot(result.length, node);
+            result.add(node);
+          } else if (event.type == 'command/done') {
+            // done 原位回填终态(卡位/seq 保持 run 侧)。
+            final updated = _commandNodeUpdated(slot.node, event);
+            result[slot.index] = updated;
+            slot.node = updated;
+          }
+        }
+        continue;
+      }
+      result.addAll(_nodesFor(event, inbox));
     }
   }
   // 流式折叠节点(无定稿 message 的 chunk 游)按 seq 归位插入。
   final folded = _foldChunks(sorted);
   if (folded.isNotEmpty) {
     result.addAll(folded);
+  }
+  // A7:workflow 聚合卡按锚定 seq(run-start)归位。
+  for (final st in workflows.values) {
+    final node = st.toNode();
+    if (node != null) result.add(node);
+  }
+  if (folded.isNotEmpty || workflows.isNotEmpty) {
     result.sort((a, b) => a.seq.compareTo(b.seq));
   }
   return result;
 }
 
 enum _ToolKind { none, call, result }
+
+// ---------------------------------------------------------------------------
+// A2 轮级耗时指标(web turn-tail + assistantStepReading 的 Dart 等价)
+// ---------------------------------------------------------------------------
+
+/// 单轮指标:runMs(turn/start→turn/end)、ttftMs(首个文本 chunk)、
+/// decode tok/s(usage outputTokens / 首 chunk→定稿)。轮末 attach 到
+/// 该轮最后一条定稿 ChatNodeAssistant。
+class _TurnMetrics {
+  double? _turnStart;
+  double? _firstChunk;
+  int? _lastAssistantSeq;
+  int _outputTokens = 0;
+
+  /// 喂入非工具事件(边界/chunk/定稿/用量)。
+  void observe(SessionEvent event) {
+    switch (event.type) {
+      case 'turn/start':
+        _reset(event.time);
+      case 'turn/end':
+        _turnStart = _turnStart; // 结算在 attachTo;防御占位。
+      case 'assistant/chunk':
+        final chunk = event.data is Map ? (event.data as Map)['chunk'] : null;
+        final hasText = chunk is Map &&
+            ((chunk['type'] == 'text-delta' &&
+                    chunk['text'] is String &&
+                    (chunk['text'] as String).trim().isNotEmpty) ||
+                chunk['type'] == 'block-end');
+        if (hasText && _firstChunk == null) {
+          _firstChunk = event.time;
+        }
+      case 'assistant/message':
+        if (event.data is Map &&
+            (event.data as Map)['message'] is Map &&
+            ((event.data as Map)['message'] as Map)['content'] is List &&
+            (((event.data as Map)['message'] as Map)['content'] as List)
+                .isNotEmpty) {
+          _lastAssistantSeq = event.seq;
+        }
+        final usage = event.data is Map
+            ? (event.data as Map)['usage']
+            : null;
+        if (usage is Map && usage['outputTokens'] is num) {
+          _outputTokens += (usage['outputTokens'] as num).toInt();
+        }
+      default:
+        break;
+    }
+  }
+
+  void _reset(double time) {
+    _turnStart = time;
+    _firstChunk = null;
+    _lastAssistantSeq = null;
+    _outputTokens = 0;
+  }
+
+  /// turn/end:把 runMs/ttftMs/tok-s 回填到最后一条定稿助手消息。
+  void attachTo(List<ChatNode> result) {
+    final start = _turnStart;
+    final seq = _lastAssistantSeq;
+    if (start == null || seq == null) {
+      _reset(start ?? 0);
+      return;
+    }
+    for (var i = result.length - 1; i >= 0; i--) {
+      final n = result[i];
+      if (n is ChatNodeAssistant && !n.streaming && n.seq == seq) {
+        final end = n.time ?? start;
+        final runMs = (end - start).clamp(0.0, double.infinity);
+        final Double1 = _firstChunk;
+        final ttft = Double1 == null
+            ? null
+            : (Double1 - start).clamp(0.0, double.infinity);
+        final tps = (Double1 != null && _outputTokens > 0)
+            ? _outputTokens /
+                  ((end - Double1).clamp(1.0, double.infinity) / 1000)
+            : null;
+        result[i] = ChatNodeAssistant(
+          seq: n.seq,
+          type: n.type,
+          text: n.text,
+          images: n.images,
+          streaming: n.streaming,
+          time: n.time,
+          runMs: runMs,
+          ttftMs: ttft,
+          tokensPerSecond: tps,
+        );
+        break;
+      }
+    }
+    _reset(start);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A6 steering 判定:next-step inbox 折叠(web ui-conversation inbox.ts 同款)
+// ---------------------------------------------------------------------------
+
+class _NextStepInboxState {
+  final List<String> _pending = <String>[];
+  final Set<String> _claimed = <String>{};
+
+  /// web applySplice:target=next-step 且非 canceled 时,被移除项记 claimed
+  ///(= 已被运行中步骤接纳,对应落位的 user/message 是 steering)。
+  void applySplice(dynamic data) {
+    if (data is! Map) return;
+    if (data['target'] != 'next-step') return;
+    final start = data['start'];
+    final removedCount = data['removedCount'];
+    final inserted = data['inserted'];
+    final s = start is int ? start : (start is num ? start.toInt() : 0);
+    final rc = removedCount is int
+        ? removedCount
+        : (removedCount is num ? removedCount.toInt() : 0);
+    final ids = <String>[
+      if (inserted is List)
+        for (final e in inserted)
+          if (e is Map && e['id'] is String) e['id'] as String,
+    ];
+    final clamped = s.clamp(0, _pending.length);
+    final removed = _pending.splice(clamped, rc, ids);
+    for (final id in ids) {
+      _claimed.remove(id);
+    }
+    if (data['outcome'] != 'canceled') {
+      _claimed.addAll(removed);
+    }
+  }
+
+  bool isClaimed(String? id) => id != null && _claimed.contains(id);
+}
+
+extension _Splice<T> on List<T> {
+  /// JS Array.splice 的 Dart 版:移除 [count] 项并插入 [items],返回移除项。
+  List<T> splice(int start, int count, List<T> items) {
+    final removed = sublist(start, (start + count).clamp(start, length));
+    removeRange(start, (start + count).clamp(start, length));
+    insertAll(start, items);
+    return removed;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// B1+A7 命令卡 / workflow 聚合辅助
+// ---------------------------------------------------------------------------
+
+class _CommandSlot {
+  _CommandSlot(this.index, this.node);
+  final int index;
+  ChatNodeCommand node;
+}
+
+String? _commandIdOf(dynamic data) =>
+    data is Map && data['commandId'] is String ? data['commandId'] as String? : null;
+
+ChatNodeCommand _commandNodeFrom(SessionEvent event) {
+  final data = event.data;
+  return ChatNodeCommand(
+    seq: event.seq,
+    type: event.type,
+    name: data is Map && data['name'] is String ? data['name'] as String? : null,
+    args: data is Map && data['args'] is String ? data['args'] as String? : null,
+    time: event.time,
+  );
+}
+
+ChatNodeCommand _commandNodeUpdated(ChatNodeCommand node, SessionEvent done) {
+  final data = done.data;
+  return ChatNodeCommand(
+    seq: node.seq,
+    type: node.type,
+    name: node.name,
+    args: node.args,
+    outcomeKind: data is Map && data['kind'] is String ? data['kind'] as String? : null,
+    outcomeText: data is Map && data['text'] is String ? data['text'] as String? : null,
+    done: true,
+    time: node.time,
+  );
+}
+
+/// workflow 家族事件的 runId 提取(非 workflow 事件返回 null)。
+String? _workflowRunIdOf(String type, dynamic data) {
+  switch (type) {
+    case 'tool-workflow/run-start':
+    case 'tool-workflow/run-end':
+    case 'tool-workflow/agent-start':
+    case 'tool-workflow/agent-end':
+      return data is Map && data['runId'] is String ? data['runId'] as String? : null;
+    default:
+      return null;
+  }
+}
+
+class _WorkflowEventData {
+  const _WorkflowEventData(this.runId);
+  final String runId;
+}
+
+_WorkflowEventData? _workflowEventOf(SessionEvent event) {
+  final runId = _workflowRunIdOf(event.type, event.data);
+  return runId == null ? null : _WorkflowEventData(runId);
+}
+
+class _WorkflowMemberState {
+  _WorkflowMemberState(this.seq, this.label, this.childId, this.phase);
+  final int seq;
+  final String label;
+  final String childId;
+  final String? phase;
+  String? outcome;
+}
+
+class _WorkflowState {
+  _WorkflowState({required this.runId, required this.anchorSeq, this.time});
+  final String runId;
+  final int anchorSeq;
+  final double? time;
+  String name = '';
+  String? stopReason;
+  final List<_WorkflowMemberState> members = [];
+
+  void apply(SessionEvent event, _WorkflowEventData wf) {
+    final data = event.data;
+    switch (event.type) {
+      case 'tool-workflow/run-start':
+        if (data is Map && data['name'] is String) {
+          name = data['name'] as String;
+        }
+      case 'tool-workflow/agent-start':
+        if (data is Map) {
+          final label =
+              data['label'] is String ? data['label'] as String : '成员';
+          final childId =
+              data['childId'] is String ? data['childId'] as String : '';
+          members.add(
+            _WorkflowMemberState(
+              data['seq'] is int ? data['seq'] as int : members.length,
+              label,
+              childId,
+              data['phase'] is String ? data['phase'] as String? : null,
+            ),
+          );
+        }
+      case 'tool-workflow/agent-end':
+        if (data is Map) {
+          final seq = data['seq'];
+          final outcome = data['outcome'];
+          for (final m in members) {
+            if (seq is int && m.seq == seq) {
+              m.outcome = outcome is String ? outcome : m.outcome;
+            }
+          }
+        }
+      case 'tool-workflow/run-end':
+        if (data is Map && data['stopReason'] is String) {
+          stopReason = data['stopReason'] as String?;
+        }
+    }
+  }
+
+  ChatNodeWorkflowRun? toNode() {
+    if (name.isEmpty && members.isEmpty) return null;
+    final status = switch (stopReason) {
+      'completed' => 'completed',
+      'cancelled' => 'cancelled',
+      'error' => 'failed',
+      null => 'running',
+      _ => 'interrupted',
+    };
+    final phases = <WorkflowPhase>[];
+    for (final m in members) {
+      final key = m.phase == null ? 'missing' : 'value:${m.phase!.length}:${m.phase}';
+      var group = phases.where((p) => p.key == key).firstOrNull;
+      if (group == null) {
+        group = WorkflowPhase(key: key, phase: m.phase, members: []);
+        phases.add(group);
+      }
+      group.members.add(
+        WorkflowMember(
+          seq: m.seq,
+          label: m.label,
+          childId: m.childId,
+          status: _memberStatus(m, status),
+        ),
+      );
+    }
+    return ChatNodeWorkflowRun(
+      seq: anchorSeq,
+      type: 'tool-workflow/run',
+      runId: runId,
+      name: name,
+      status: status,
+      phases: phases,
+      time: time,
+    );
+  }
+
+  String _memberStatus(_WorkflowMemberState m, String runStatus) {
+    switch (m.outcome) {
+      case 'completed':
+        return 'completed';
+      case 'cancelled':
+        return 'cancelled';
+      case 'failed':
+        return 'failed';
+      case null:
+        return runStatus == 'running' ? 'running' : 'interrupted';
+      default:
+        return 'interrupted';
+    }
+  }
+}
 
 /// 工具事件判定:优先信 view(主机渲染意图),其次按类型名猜测。
 /// code-dispatch 是 run_code 的内部派发子调用(父卡已汇总输出),不算工具卡。
@@ -354,6 +906,10 @@ ChatNodeTool _interruptedCall(ChatNodeTool call, int seq) => ChatNodeTool(
       status: ToolStatus.interrupted,
       callSeq: call.callSeq ?? call.seq,
       resultSeq: seq,
+      time: call.time,
+      callTime: call.callTime ?? call.time,
+      resultTime: call.resultTime,
+      producedPaths: call.producedPaths,
     );
 
 /// 配对:先按 callId 精确匹配,否则取最近(最后加入)的未配对 call。
@@ -387,7 +943,30 @@ ChatNodeTool _buildToolCall(SessionEvent event, ToolEventView? view) {
     summary: summary,
     status: ToolStatus.running,
     callSeq: event.seq,
+    time: event.time,
+    callTime: event.time,
+    producedPaths: _producedPathsOfView(viewMap),
   );
+}
+
+/// A1(web producedPaths):call view 的渲染意图 —— card='diff' 或
+/// card='generic' 且 kind='edit' 时,locations[].path 即产出文件。
+List<String> _producedPathsOfView(Map<String, dynamic>? viewMap) {
+  if (viewMap == null) return const <String>[];
+  final card = viewMap['card'];
+  final isMutation = card == 'diff' ||
+      (card == 'generic' && viewMap['kind'] == 'edit');
+  if (!isMutation) return const <String>[];
+  final locations = viewMap['locations'];
+  if (locations is! List) return const <String>[];
+  final paths = <String>[];
+  for (final l in locations) {
+    if (l is Map && l['path'] is String) {
+      final p = l['path'] as String?;
+      if (p != null && p.isNotEmpty) paths.add(p);
+    }
+  }
+  return paths;
 }
 
 ChatNodeTool _buildToolResult(SessionEvent event, ToolEventView? view) {
@@ -429,6 +1008,8 @@ ChatNodeTool _buildToolResult(SessionEvent event, ToolEventView? view) {
     summary: summary,
     status: status,
     resultSeq: event.seq,
+    time: event.time,
+    resultTime: event.time,
   );
 }
 
@@ -447,6 +1028,10 @@ ChatNodeTool _mergeCallResult(ChatNodeTool call, ChatNodeTool result) =>
       status: result.status,
       callSeq: call.callSeq ?? call.seq,
       resultSeq: result.resultSeq ?? result.seq,
+      time: call.time,
+      callTime: call.callTime ?? call.time,
+      resultTime: result.resultTime,
+      producedPaths: call.producedPaths,
     );
 
 // ---------------------------------------------------------------------------
@@ -481,10 +1066,12 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
       final key = _stepKeyOf(data);
       if (key == null) continue;
       final blocks = groups.putIfAbsent(key, () => <_FoldedBlock>[]);
-      meta.putIfAbsent(
+      final meta0 = meta.putIfAbsent(
         key,
         () => _ChunkGroupMeta(firstSeq: event.seq, lastSeq: event.seq),
-      )..lastSeq = event.seq;
+      );
+      meta0.lastSeq = event.seq;
+      meta0.time ??= event.time;
       final index = (chunk['index'] as num?)?.toInt() ?? blocks.length;
       final type = chunk['type'];
       if (type == 'block-start') {
@@ -562,6 +1149,7 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
           type: 'assistant/chunk/reasoning',
           text: reasoning,
           streaming: streaming,
+          time: m.time,
         ),
       );
     }
@@ -572,6 +1160,7 @@ List<ChatNode> _foldChunks(List<EventNodeInput> sorted) {
           type: 'assistant/chunk',
           text: text,
           streaming: streaming,
+          time: m.time,
         ),
       );
     }
@@ -583,6 +1172,7 @@ class _ChunkGroupMeta {
   _ChunkGroupMeta({required this.firstSeq, required this.lastSeq});
   int firstSeq;
   int lastSeq;
+  double? time;
 }
 
 const Set<String> _settleTypes = {
@@ -736,21 +1326,33 @@ List<ImageAttachmentRef> _imageRefs(dynamic data) {
   return refs;
 }
 
-List<ChatNode> _nodesFor(SessionEvent event) {
+List<ChatNode> _nodesFor(SessionEvent event, _NextStepInboxState inbox) {
   final type = event.type;
   final data = event.data;
   if (type == 'user/message') {
-    // 直发人类消息才冒泡;agent.inject 的合成上下文不进聊天流(对齐 chat_view_model)。
-    if (_injected(data)) return const [];
+    // A5+A6:按 web messageDefinition 三分类 ——
+    // source.kind == 'user':右气泡(claimed → steering 插话变体);
+    // 其余:注入上下文 → 左侧低调 ContextRow(不再一刀切过滤)。
+    final source = data is Map && data['source'] is Map
+        ? data['source'] as Map
+        : null;
+    final kind = source?['kind'];
+    if (kind != null && kind != 'user') {
+      final ctx = _contextRowFor(event, source!);
+      return ctx == null ? const [] : [ctx];
+    }
     final text = extractText(data);
     final images = _imageRefs(data);
     if (text.isEmpty && images.isEmpty) return const [];
+    final messageId = data is Map && data['id'] is String ? data['id'] as String? : null;
     return [
       ChatNodeUser(
         seq: event.seq,
         type: type,
         text: text,
         images: images.isEmpty ? null : images,
+        steering: inbox.isClaimed(messageId),
+        time: event.time,
       ),
     ];
   }
@@ -761,7 +1363,12 @@ List<ChatNode> _nodesFor(SessionEvent event) {
     final nodes = <ChatNode>[];
     if (think != null && think.isNotEmpty) {
       nodes.add(
-        ChatNodeThink(seq: event.seq, type: '$type/reasoning', text: think),
+        ChatNodeThink(
+          seq: event.seq,
+          type: '$type/reasoning',
+          text: think,
+          time: event.time,
+        ),
       );
     }
     if (text.isNotEmpty || images.isNotEmpty) {
@@ -771,6 +1378,7 @@ List<ChatNode> _nodesFor(SessionEvent event) {
           type: type,
           text: text,
           images: images.isEmpty ? null : images,
+          time: event.time,
         ),
       );
     }
@@ -780,7 +1388,9 @@ List<ChatNode> _nodesFor(SessionEvent event) {
     // 无 data.chunk 的防御形状:按文本渲染为普通助手消息(合并由调用方处理)。
     final text = extractText(data);
     if (text.isEmpty) return const [];
-    return [ChatNodeAssistant(seq: event.seq, type: type, text: text)];
+    return [
+      ChatNodeAssistant(seq: event.seq, type: type, text: text, time: event.time),
+    ];
   }
   if (type.startsWith('assistant/') &&
       (type.contains('reasoning') || type.contains('think'))) {
@@ -809,6 +1419,7 @@ List<ChatNode> _nodesFor(SessionEvent event) {
         kind: kind,
         summary: summary,
         messages: messages,
+        time: event.time,
       ),
     ];
   }
@@ -824,6 +1435,7 @@ List<ChatNode> _nodesFor(SessionEvent event) {
         reason: reason,
         attempt: attempt,
         maxRetries: maxRetries,
+        time: event.time,
       ),
     ];
   }
@@ -832,14 +1444,40 @@ List<ChatNode> _nodesFor(SessionEvent event) {
   }
   if (type == 'turn/error' || type.startsWith('turn/error')) {
     final message = _pick(data, null, ['message', 'error', 'text']) ?? type;
-    return [ChatNodeError(seq: event.seq, type: type, message: message)];
+    return [
+      ChatNodeError(
+        seq: event.seq,
+        type: type,
+        message: message,
+        time: event.time,
+      ),
+    ];
   }
-  final notice = _noticeFor(event);
-  if (notice != null) return [notice];
+  // B2 unknown 收窄(镜像 web fallback.ts):只有 surface 三类型
+  // (user/message | assistant/message | tool/result)且 surfaceOp=='append'
+  // 但未被本提取器认识的情形,才显示兜底卡;其余未知类型一律不可见
+  //(web:未注册节点的 surface 事件之外的类型根本不进时间线)。
+  if (type == 'user/message' ||
+      type == 'assistant/message' ||
+      type == 'tool/result') {
+    // 已在上面各分支处理过的形状不会到这里;仍会到这里的 = 结构可识别
+    // 但内容空/未产出节点的合法变体(如空 content 的 assistant/message),
+    // web 同样不渲染 —— 不可见。
+    if (event.surfaceOp == 'append') {
+      // surface 三类型 + append 且上面分支没接住(理论上仅防御形状)
+      // → 与 web unknown-surface 兜底一致。
+      if (data is Map && data.isNotEmpty) {
+        return [
+          ChatNodeUnknown(seq: event.seq, type: type, data: data, time: event.time),
+        ];
+      }
+    }
+    return const [];
+  }
   // 协议分隔符/内部管道事件不在主聊天流占位。
   if (_isInternalEvent(type)) return const [];
-  // 真正未知的类型才走兜底,避免把已知协议事件伪装成未知数据。
-  return [ChatNodeUnknown(seq: event.seq, type: type, data: data)];
+  // 非三类型的未知事件:web 无节点注册 → 时间线不可见(log-only)。
+  return const [];
 }
 
 /// llm/retry 失败原因:顶层 reason/message/error,或 failure.message(线上形状)。
@@ -941,187 +1579,15 @@ String _failureText(dynamic failure) {
   return '轮次失败';
 }
 
-ChatNodeNotice? _noticeFor(SessionEvent event) {
-  final type = event.type;
-  final data = event.data;
-  switch (type) {
-    case 'permission/preset':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '权限预设已更新',
-        detail: _pick(data, null, ['preset', 'name', 'value']),
-        icon: 'shield',
-      );
-    case 'sandbox/mode':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '沙箱模式已更新',
-        detail: _pick(data, null, ['mode', 'name', 'value']),
-        icon: 'lock',
-      );
-    case 'approval/policy':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '审批策略已更新',
-        detail: _pick(data, null, ['policy', 'name', 'value']),
-        icon: 'approval',
-      );
-    case 'approval/asked':
-      // 会话事件层的审批轨迹(mux approval/requested 负责交互卡)。
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '等待审批',
-        detail: _approvalAskedDetail(data),
-        icon: 'approval',
-      );
-    case 'approval/decided':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '审批已处理',
-        detail: _approvalOutcome(data),
-        icon: 'approval',
-      );
-    case 'agent-preset/selected':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: 'Agent 预设已切换',
-        detail: _pick(data, null, ['preset', 'name', 'id', 'agentPreset']),
-        icon: 'sparkle',
-      );
-    case 'command/run':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '正在执行命令',
-        detail: _pick(data, null, ['name', 'command', 'input']),
-        icon: 'terminal',
-      );
-    case 'command/done':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '命令执行完成',
-        detail: _pick(data, null, ['name', 'command']),
-        icon: 'check',
-      );
-    case 'agent/inbox/spliced':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '上下文已更新',
-        detail: _splicedDetail(data),
-        icon: 'inbox',
-      );
-    case 'goal/change':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '目标已更新',
-        detail: _pick(data, null, ['title', 'goal', 'summary', 'text']),
-        icon: 'target',
-      );
-    case 'plan/mode':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '计划模式已切换',
-        detail: _pick(data, null, ['mode', 'name', 'value']),
-        icon: 'plan',
-      );
-    case 'schedule/change':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '定时任务已更新',
-        detail: _pick(data, null, ['name', 'scheduleId', 'summary']),
-        icon: 'schedule',
-      );
-    case 'tool-workflow/run-start':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '工作流已启动',
-        detail: _pick(data, null, ['name', 'workflowName', 'runId']),
-        icon: 'workflow',
-      );
-    case 'tool-workflow/run-end':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '工作流已结束',
-        detail: _pick(data, null, ['name', 'workflowName', 'runId']),
-        icon: 'workflow',
-      );
-    case 'tool-workflow/agent-start':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '子代理已启动',
-        detail: _pick(data, null, ['label', 'name', 'agentId']),
-        icon: 'agents',
-      );
-    case 'tool-workflow/agent-end':
-      return ChatNodeNotice(
-        seq: event.seq,
-        type: type,
-        title: '子代理已结束',
-        detail: _pick(data, null, ['label', 'name', 'agentId']),
-        icon: 'agents',
-      );
-    default:
-      return null;
-  }
-}
-
-String? _approvalAskedDetail(dynamic data) {
-  if (data is! Map) return null;
-  final tool = _pick(data, null, ['toolName', 'name']);
-  final reason = _pick(data, null, ['reason']);
-  if (tool == null) return reason;
-  if (reason == null) return tool;
-  return '$tool · $reason';
-}
-
-String? _approvalOutcome(dynamic data) {
-  if (data is! Map) return null;
-  final outcome = data['outcome'];
-  switch (outcome) {
-    case 'allowed-once':
-      return '已允许(仅此一次)';
-    case 'allowed-always':
-    case 'allowed':
-      return '已允许';
-    case 'rejected':
-      return '已拒绝';
-    case String s:
-      return s;
-    default:
-      return null;
-  }
-}
-
-String? _splicedDetail(dynamic data) {
-  if (data is! Map) return null;
-  final inserted = data['inserted'];
-  final removed = data['removedCount'];
-  final insertedCount = inserted is List ? inserted.length : null;
-  if (insertedCount != null && removed is int) {
-    return '注入 $insertedCount 条 · 移除 $removed 条';
-  }
-  if (insertedCount != null) return '注入 $insertedCount 条';
-  if (removed is int) return '移除 $removed 条';
-  return _pick(data, null, ['summary', 'message', 'text']);
-}
-
 /// 内部/管道事件(真实日志普查 + known-event-types 全集):
 /// turn 与 step 边界、请求上下文、标题投影、子代理描述符、反馈落盘、
 /// run_code 派发的 code-dispatch 子调用、钩子、检索类 LLM 请求。
+/// B1 重分类追加(2026-08-17 parity 轮):web 时间线无对应节点的投影/芯片类
+/// 事件 —— permission/preset、sandbox/mode、approval/policy(composer chip)、
+/// approval/asked|decided(ApprovalPanel 交互卡,mux 帧负责,时间线无痕)、
+/// agent/inbox/spliced(publication 'none',已提前消费做 steering 判定)、
+/// goal/change(GoalBar 投影)、plan/mode(plan chip)、schedule/change、
+/// agent-preset/selected —— 全部不可见(信息面由各自常驻 UI 承载)。
 bool _isInternalEvent(String type) =>
     type == 'turn/start' ||
     type == 'turn/end' ||
@@ -1141,17 +1607,97 @@ bool _isInternalEvent(String type) =>
     type == 'hook/invoked' ||
     type == 'hook/result' ||
     type == 'web/deepseek-search-llm-request' ||
-    type == 'connection/reset';
+    type == 'connection/reset' ||
+    type == 'permission/preset' ||
+    type == 'sandbox/mode' ||
+    type == 'approval/policy' ||
+    type == 'approval/asked' ||
+    type == 'approval/decided' ||
+    type == 'agent-preset/selected' ||
+    type == 'goal/change' ||
+    type == 'plan/mode' ||
+    type == 'schedule/change';
 
-/// 合成上下文判定:source.kind 存在且非 'user' → 过滤。
-bool _injected(dynamic data) {
-  if (data is! Map) return false;
-  final source = data['source'];
-  if (source is Map) {
-    final kind = source['kind'];
-    return kind != null && kind != 'user';
+/// A5 注入上下文行(web contextProvenance + contextBody 的 Dart 移植)。
+/// provenance:agent-instructions 取 changes[].path;plugin 取 plugin id;
+/// skill-invocation 取 name;session-reference 取 references[].label(role=recall);
+/// 其余回退 source.kind。summary 仅 notice form(source.summary)。
+ChatNodeContextRow? _contextRowFor(SessionEvent event, Map source) {
+  final text = extractText(event.data);
+  if (text.isEmpty) return null;
+  final provenance = _contextProvenance(source);
+  final summary = source['summary'] is String
+      ? source['summary'] as String?
+      : null;
+  return ChatNodeContextRow(
+    seq: event.seq,
+    type: event.type,
+    provenanceLabel: provenance.label,
+    recall: provenance.recall,
+    summary: summary,
+    text: text,
+    time: event.time,
+  );
+}
+
+class _ContextProvenance {
+  const _ContextProvenance({required this.recall, required this.label});
+  final bool recall;
+  final String? label;
+}
+
+/// web contextProvenance 移植:角色(inject/recall)+ 生产者可读名。
+_ContextProvenance _contextProvenance(Map source) {
+  final kind = source['kind'];
+  if (kind is! String || kind.isEmpty) {
+    return const _ContextProvenance(recall: false, label: null);
   }
-  return false;
+  switch (kind) {
+    case 'session-reference':
+      final refs = source['references'];
+      final labels = <String>[];
+      if (refs is List) {
+        for (final r in refs) {
+          if (r is Map && r['label'] is String) {
+            final l = r['label'] as String?;
+            if (l != null && l.isNotEmpty && !labels.contains(l)) labels.add(l);
+          }
+        }
+      }
+      return _ContextProvenance(
+        recall: true,
+        label: labels.isNotEmpty ? labels.join(', ') : kind,
+      );
+    case 'agent-instructions':
+      final changes = source['changes'];
+      final paths = <String>[];
+      if (changes is List) {
+        for (final c in changes) {
+          if (c is Map && c['path'] is String) {
+            final p = c['path'] as String?;
+            if (p != null && p.isNotEmpty && !paths.contains(p)) paths.add(p);
+          }
+        }
+      }
+      return _ContextProvenance(
+        recall: false,
+        label: paths.isNotEmpty ? paths.join(', ') : kind,
+      );
+    case 'plugin':
+      final plugin = source['plugin'];
+      return _ContextProvenance(
+        recall: false,
+        label: plugin is String && plugin.isNotEmpty ? plugin : kind,
+      );
+    case 'skill-invocation':
+      final name = source['name'];
+      return _ContextProvenance(
+        recall: false,
+        label: name is String && name.isNotEmpty ? name : kind,
+      );
+    default:
+      return _ContextProvenance(recall: false, label: kind);
+  }
 }
 
 /// 提取 assistant/message 中 reasoning 块的文本(拆成 think 节点)。

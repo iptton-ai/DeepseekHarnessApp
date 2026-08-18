@@ -39,7 +39,7 @@ void main() {
     expect(n.text, '你好,世界');
   });
 
-  test('user/message 合成上下文(source=agent)不产出,对齐 chat_view_model', () {
+  test('user/message 注入上下文(source=agent)→ ContextRow(A5 对齐 web)', () {
     final nodes = extractNodes([
       _in(1, 'user/message', {
         'content': <Map<String, dynamic>>[
@@ -48,7 +48,11 @@ void main() {
         'source': <String, dynamic>{'kind': 'agent'},
       }),
     ]);
-    expect(nodes, isEmpty);
+    // 不再一刀切过滤:左侧低调注入行(provenance 回退 kind)。
+    final ctx = nodes.single as ChatNodeContextRow;
+    expect(ctx.provenanceLabel, 'agent');
+    expect(ctx.recall, isFalse);
+    expect(ctx.text, '内部注入');
   });
 
   test('assistant/message → markdown 助手消息', () {
@@ -274,26 +278,35 @@ void main() {
     expect((fallback.single as ChatNodeError).message, 'turn/error');
   });
 
-  test('未知类型 → 兜底节点(类型名 + 原始 data 保留)', () {
+  test('B2 unknown 收窄:非 surface 三类型的未知事件一律不可见', () {
+    // web fallback.ts:未注册节点的类型根本不进时间线(log-only)。
     final nodes = extractNodes([
       _in(13, 'mystery/thing', {'x': 1}),
+      _in(14, 'future/surface-ish', {'y': 2}),
     ]);
-    expect(nodes, hasLength(1));
-    final u = nodes.single as ChatNodeUnknown;
-    expect(u.type, 'mystery/thing');
-    expect(u.data, {'x': 1});
+    expect(nodes, isEmpty);
   });
 
-  test('已知协议状态事件 → 人类可读提示;turn 边界不进入聊天流', () {
+  test('B1 噪声重分类:投影/芯片类事件时间线不可见(web 无对应节点)', () {
+    // permission/preset、sandbox/mode、approval/policy、approval/asked|decided、
+    // goal/change、plan/mode、schedule/change、agent-preset/selected 全部
+    // 不可见 —— 信息面由 composer chip / 审批交互卡 / GoalBar 等常驻 UI 承载。
     final nodes = extractNodes([
       _in(13, 'turn/start', <String, dynamic>{}),
       _in(14, 'sandbox/mode', {'mode': 'workspace-write'}),
-      _in(15, 'turn/end', <String, dynamic>{}),
+      _in(15, 'permission/preset', {'preset': 'workspace-write'}),
+      _in(16, 'approval/policy', {'policy': 'ask'}),
+      _in(17, 'approval/asked', {'toolName': 'bash'}),
+      _in(18, 'approval/decided', {'outcome': 'allowed-once'}),
+      _in(19, 'goal/change', {
+        'goal': {'objective': 'x'}
+      }),
+      _in(20, 'plan/mode', {'active': true}),
+      _in(21, 'schedule/change', {'name': '日报'}),
+      _in(22, 'agent-preset/selected', {'agentPreset': 'web'}),
+      _in(23, 'turn/end', <String, dynamic>{}),
     ]);
-    expect(nodes, hasLength(1));
-    final notice = nodes.single as ChatNodeNotice;
-    expect(notice.title, '沙箱模式已更新');
-    expect(notice.detail, 'workspace-write');
+    expect(nodes, isEmpty);
   });
 
 
@@ -504,7 +517,9 @@ void main() {
     expect(r.maxRetries, 2);
   });
 
-  test('approval/asked + approval/decided → 审批轨迹短提示', () {
+  test('approval/asked|decided → 时间线不可见(B1;交互卡由 mux 帧负责)', () {
+    // web:ApprovalPanel composer 接管,时间线无痕;mux approval/requested
+    // 才是交互卡数据源 —— 会话事件层不再双份提示。
     final nodes = extractNodes([
       _in(40, 'approval/asked', {
         'id': 'ap1',
@@ -517,14 +532,7 @@ void main() {
         'outcome': 'allowed-once',
       }),
     ]);
-    expect(nodes, hasLength(2));
-    final asked = nodes[0] as ChatNodeNotice;
-    expect(asked.title, '等待审批');
-    expect(asked.detail, contains('bash'));
-    expect(asked.detail, contains('escalate sandbox'));
-    final decided = nodes[1] as ChatNodeNotice;
-    expect(decided.title, '审批已处理');
-    expect(decided.detail, '已允许(仅此一次)');
+    expect(nodes, isEmpty);
   });
 
   test('协议管道事件不进主聊天流(不再伪装成未知事件)', () {
@@ -547,37 +555,284 @@ void main() {
     expect(nodes, isEmpty);
   });
 
-  test('tool-workflow / plan/mode / schedule/change → 短提示', () {
+  test('tool-workflow 四事件 → 单张聚合运行卡(A7 对齐 web workflow-run)', () {
     final nodes = extractNodes([
-      _in(1, 'tool-workflow/run-start', {'name': 'audit'}),
-      _in(2, 'tool-workflow/run-end', {'name': 'audit'}),
-      _in(3, 'tool-workflow/agent-start', {'label': '审计员 A'}),
-      _in(4, 'tool-workflow/agent-end', {'label': '审计员 A'}),
-      _in(5, 'plan/mode', {'mode': 'plan'}),
-      _in(6, 'schedule/change', {'name': '日报'}),
-    ]);
-    expect(nodes, hasLength(6));
-    expect(nodes.every((n) => n is ChatNodeNotice), isTrue);
-    expect((nodes[0] as ChatNodeNotice).title, '工作流已启动');
-    expect((nodes[3] as ChatNodeNotice).title, '子代理已结束');
-    expect((nodes[4] as ChatNodeNotice).title, '计划模式已切换');
-    expect((nodes[5] as ChatNodeNotice).title, '定时任务已更新');
-  });
-
-  test('agent/inbox/spliced → 注入/移除计数', () {
-    final nodes = extractNodes([
-      _in(1, 'agent/inbox/spliced', {
-        'target': 'next-turn',
-        'inserted': [
-          {'content': []},
-          {'content': []},
-        ],
-        'removedCount': 1,
+      _in(1, 'tool-workflow/run-start', {
+        'runId': 'r1',
+        'name': 'audit',
+      }),
+      _in(2, 'tool-workflow/agent-start', {
+        'runId': 'r1',
+        'seq': 0,
+        'label': '审计员 A',
+        'phase': 'scan',
+        'childId': 'child-a',
+      }),
+      _in(3, 'tool-workflow/agent-start', {
+        'runId': 'r1',
+        'seq': 1,
+        'label': '审计员 B',
+        'childId': 'child-b',
+      }),
+      _in(4, 'tool-workflow/agent-end', {
+        'runId': 'r1',
+        'seq': 0,
+        'outcome': 'completed',
+      }),
+      _in(5, 'tool-workflow/run-end', {
+        'runId': 'r1',
+        'stopReason': 'error',
       }),
     ]);
-    final n = nodes.single as ChatNodeNotice;
-    expect(n.title, '上下文已更新');
-    expect(n.detail, '注入 2 条 · 移除 1 条');
+    expect(nodes, hasLength(1));
+    final run = nodes.single as ChatNodeWorkflowRun;
+    expect(run.name, 'audit');
+    expect(run.status, 'failed'); // stopReason=error → failed
+    expect(run.seq, 1); // 锚定 run-start
+    expect(run.phases, hasLength(2)); // scan 阶段 + 未声明阶段
+    expect(run.phases[0].phase, 'scan');
+    expect(run.phases[0].members.single.label, '审计员 A');
+    expect(run.phases[0].members.single.status, 'completed');
+    expect(run.phases[1].phase, isNull); // 未声明 phase 的成员归默认组
+    // run 已结束但成员 1 无 agent-end → interrupted(web 同款)。
+    expect(run.phases[1].members.single.status, 'interrupted');
+  });
+
+  test('command/run+done → 单张命令卡配对(B1 换形式)', () {
+    final nodes = extractNodes([
+      _in(10, 'command/run', {
+        'commandId': 'cmd-1',
+        'name': 'permission',
+        'args': ' danger-full-access',
+      }),
+      _in(11, 'command/done', {
+        'commandId': 'cmd-1',
+        'kind': 'success',
+        'text': 'preset danger-full-access',
+      }),
+    ]);
+    expect(nodes, hasLength(1));
+    final cmd = nodes.single as ChatNodeCommand;
+    expect(cmd.name, 'permission');
+    expect(cmd.args, contains('danger-full-access'));
+    expect(cmd.done, isTrue);
+    expect(cmd.outcomeKind, 'success');
+    expect(cmd.outcomeText, 'preset danger-full-access');
+    expect(cmd.seq, 10); // 锚定 run 事件
+    // 只有 run 无 done:运行中卡。
+    final running = extractNodes([
+      _in(12, 'command/run', {
+        'commandId': 'cmd-2',
+        'name': 'export',
+      }),
+    ]);
+    final r2 = running.single as ChatNodeCommand;
+    expect(r2.done, isFalse);
+    expect(r2.outcomeKind, isNull);
+  });
+
+  test('A1 轮末产出文件:修改意图 view locations 在 turn/end 结转为 Deliverables', () {
+    final nodes = extractNodes([
+      _in(1, 'turn/start', {'turn': 1}),
+      _in(2, 'tool/call', {
+        'name': 'edit',
+        'callId': 'c1',
+        'input': {'path': 'a.dart'},
+      }, _callView({
+        'card': 'generic',
+        'kind': 'edit',
+        'locations': [
+          {'path': 'lib/a.dart'},
+        ],
+      })),
+      _in(3, 'tool/result', {
+        'message': {
+          'source': {'callId': 'c1'},
+          'content': [
+            {
+              'type': 'tool-result',
+              'content': [
+                {'type': 'text', 'text': 'ok'},
+              ],
+            }
+          ],
+        }
+      }),
+      // 同路径二次编辑:首见去重。
+      _in(4, 'tool/call', {
+        'name': 'edit',
+        'callId': 'c2',
+        'input': {'path': 'a.dart'},
+      }, _callView({
+        'card': 'diff',
+        'locations': [
+          {'path': 'lib/a.dart'},
+          {'path': 'lib/b.dart'},
+        ],
+      })),
+      _in(5, 'tool/result', {
+        'message': {
+          'source': {'callId': 'c2'},
+          'content': [
+            {
+              'type': 'tool-result',
+              'content': [
+                {'type': 'text', 'text': 'ok'},
+              ],
+            }
+          ],
+        }
+      }),
+      _in(6, 'turn/end', {'reason': {'kind': 'completed'}}),
+    ]);
+    final deliverables = nodes.whereType<ChatNodeDeliverables>().single;
+    expect(deliverables.paths, ['lib/a.dart', 'lib/b.dart']);
+    expect(deliverables.seq, 6); // 锚定 turn/end
+  });
+
+  test('A1 失败调用的产出不计入;读类调用无产出', () {
+    final nodes = extractNodes([
+      _in(1, 'turn/start', {'turn': 1}),
+      _in(2, 'tool/call', {
+        'name': 'edit',
+        'callId': 'c1',
+        'input': {'path': 'a.dart'},
+      }, _callView({
+        'card': 'generic',
+        'kind': 'edit',
+        'locations': [
+          {'path': 'lib/failed.dart'},
+        ],
+      })),
+      _in(3, 'tool/result', {
+        'message': {
+          'source': {'callId': 'c1'},
+          'content': [
+            {
+              'type': 'tool-result',
+              'isError': true,
+              'content': [
+                {'type': 'text', 'text': 'boom'},
+              ],
+            }
+          ],
+        }
+      }),
+      _in(4, 'turn/end', {'reason': {'kind': 'completed'}}),
+    ]);
+    expect(nodes.whereType<ChatNodeDeliverables>(), isEmpty);
+  });
+
+  test('A5 provenance 词表:plugin/skill/instructions/session-reference', () {
+    final nodes = extractNodes([
+      _in(1, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': 'p'},
+        ],
+        'source': {'kind': 'plugin', 'plugin': 'tool-jobs', 'form': 'notice', 'summary': 'job done'},
+      }),
+      _in(2, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': 's'},
+        ],
+        'source': {'kind': 'skill-invocation', 'name': 'cordis'},
+      }),
+      _in(3, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': 'i'},
+        ],
+        'source': {
+          'kind': 'agent-instructions',
+          'changes': [
+            {'path': 'AGENTS.md'},
+            {'path': 'AGENTS.md'},
+            {'path': 'docs/X.md'},
+          ],
+        },
+      }),
+      _in(4, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': 'r'},
+        ],
+        'source': {
+          'kind': 'session-reference',
+          'references': [
+            {'label': '旧会话 A'},
+          ],
+        },
+      }),
+    ]);
+    final rows = nodes.whereType<ChatNodeContextRow>().toList();
+    expect(rows, hasLength(4));
+    expect(rows[0].provenanceLabel, 'tool-jobs');
+    expect(rows[0].summary, 'job done'); // notice form 的 summary 上折叠行
+    expect(rows[1].provenanceLabel, 'cordis');
+    expect(rows[2].provenanceLabel, 'AGENTS.md, docs/X.md'); // 去重
+    expect(rows[3].recall, isTrue); // session-reference → 召回
+    expect(rows[3].provenanceLabel, '旧会话 A');
+  });
+
+  test('A2 时间基线:节点携带事件 time(epoch ms)', () {
+    final nodes = extractNodes([
+      _in(1, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': 'hi'},
+        ],
+        'source': {'kind': 'user'},
+      }),
+      _in(2, 'assistant/message', {
+        'message': {
+          'content': [
+            {'type': 'text', 'text': 'hey'},
+          ],
+        },
+      }),
+    ]);
+    expect(nodes.first.time, 1786723605000 + 1);
+    expect(nodes.last.time, 1786723605000 + 2);
+  });
+
+  test('agent/inbox/spliced → 不可见,但驱动 steering 判定(A6)', () {
+    // web inbox.ts:publication 'none',next-step splice 的 removed 项记
+    // claimed → 对应落位 user/message 渲染为插话气泡。
+    final nodes = extractNodes([
+      _in(1, 'agent/inbox/spliced', {
+        'target': 'next-step',
+        'start': 0,
+        'inserted': [],
+        'removedCount': 1,
+      }),
+      // splice 之前 inbox 里得有一条排队项(先入队再被接纳)。
+      _in(0, 'agent/inbox/spliced', {
+        'target': 'next-step',
+        'start': 0,
+        'inserted': [
+          {'id': 'm-1'},
+        ],
+        'removedCount': 0,
+      }),
+      _in(2, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': '插话:换个角度'},
+        ],
+        'source': {'kind': 'user'},
+        'id': 'm-1',
+      }),
+      _in(3, 'user/message', {
+        'content': [
+          {'type': 'text', 'text': '普通新消息'},
+        ],
+        'source': {'kind': 'user'},
+        'id': 'm-2',
+      }),
+    ]);
+    // splice 本身不可见;两条用户消息,第一条是插话,第二条不是。
+    expect(nodes.whereType<ChatNodeNotice>(), isEmpty);
+    final users = nodes.whereType<ChatNodeUser>().toList();
+    expect(users, hasLength(2));
+    expect(users[0].steering, isTrue);
+    expect(users[0].text, '插话:换个角度');
+    expect(users[1].steering, isFalse);
   });
 
   test('摘要种子兜底:Map 输入无 command/path 键 → 格式化 JSON 预览(不崩溃)', () {

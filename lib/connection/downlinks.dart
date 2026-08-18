@@ -66,6 +66,16 @@ class Downlink {
       headers: headers,
       customClient: customClient,
     );
+    // 协议级保活(2026-08-17):代理对空闲 WS 普遍有超时 —— 自建 nginx 默认
+    // proxy_read_timeout 60s;客户端每 20s 发协议 ping 帧,会穿透帧透传型
+    // 代理(nginx 等,对端 ws 库自动回 pong,双向字节都刷新读计时),
+    // 间隔 20s 给默认 60s 留足余量。直连/loopback 形态无害(ping 不改变
+    // 下行语义)。
+    // ⚠️ 已知不救 CF 形态(2026-08-17 活体实证):CF 边缘在本地应答客户端
+    // ping(auto-pong),ping 帧不穿透 cloudflared 隧道腿,空闲 host 流仍
+    // 在 ~126s 被掐(code 1006)—— CF 链的保活只能靠 dsh host 侧发心跳
+    // (rc.6 未发)或锚定 rust 网关(见 AGENTS.md 远程链路)。
+    ws.pingInterval = const Duration(seconds: 20);
     return Downlink._(name, ws);
   }
 

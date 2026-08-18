@@ -329,8 +329,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 已配对时 _paired = 持令牌(远程形态);此时「发起配对」让位给状态行。
   bool get _paired => widget.hostStatus?.value.authed ?? false;
 
-  /// 「连接」分区:注入 hosts 即多主机形态(主机列表 + 添加);
-  /// 缺席保持旧形态(authed ? 状态行 : 发起配对)。
+  /// 「连接」分区:注入 hosts 即多主机形态 —— **稳定主机列表**(全部
+  /// 条目一行一台、位置不随切换重排;活动行带选中态与实时相位,其余行
+  /// 点击切换)+ 添加主机;缺席保持旧形态(authed ? 状态行 : 发起配对)。
   List<Widget> _connectionSection(BuildContext context) {
     final book = widget.hosts?.value;
     final deviceTile = _deviceNameTile(context);
@@ -352,9 +353,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     return [
       if (deviceTile != null) deviceTile,
-      _activeHostTile(context, active),
-      for (final h in book.hosts) //
-        if (h.id != active.id) _otherHostTile(context, h),
+      for (final h in book.hosts)
+        _hostTile(context, h, isActive: h.id == active.id),
       if (widget.onOpenPairing != null) _addHostTile(context),
     ];
   }
@@ -382,35 +382,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  /// 活动主机行:机器名(dsh-mobile plugin 的 label,默认设备名、宿主可改)
-  /// + 实时连接相位(事件 WS 就绪 = 绿)。未连接给「重连」按钮(authBlocked
-  /// 亦复位重启);每行可删除(删活动主机自动切到剩余首条)。
-  Widget _activeHostTile(BuildContext context, StoredCredentials host) {
+  /// 主机行(稳定列表):全部主机一行一台,位置不随切换重排 —— 点选
+  /// 哪台切哪台,活动行以选中图标显式标记。标题 = 簿内标识(hostLabel >
+  /// 网关地址,切换即随簿翻转);活动行副标题带实时相位(断线给「重连」
+  /// 按钮,authBlocked 亦复位重启);每行可删除(删活动主机自动切到
+  /// 剩余首条)。
+  Widget _hostTile(
+    BuildContext context,
+    StoredCredentials host, {
+    required bool isActive,
+  }) {
+    final colors = Theme.of(context).colorScheme;
     final status = widget.hostStatus?.value;
     final up = status?.up ?? false;
-    final machine = (status?.machine.isNotEmpty ?? false)
-        ? status!.machine
+    final machine = status?.machine ?? '';
+    final label = host.hostLabel.isEmpty
+        ? host.baseUri.authority
         : host.hostLabel;
-    final title = _hostConnectionTitle(
-      connected: up,
-      machine: machine,
-      disconnectedFallback: host.baseUri.authority,
-    );
+    final String subtitle;
+    if (isActive) {
+      subtitle = up
+          ? (machine.isEmpty ? '已连接 · 会话可用' : '已连接 · $machine')
+          : '连接中断,自动重连中';
+    } else {
+      subtitle = host.hostLabel.isEmpty ? '点击切换到此主机' : host.baseUri.authority;
+    }
     return ListTile(
       leading: Icon(
-        Icons.dns_outlined,
+        isActive ? Icons.check_circle : Icons.radio_button_unchecked,
         size: 20,
-        color: up ? Colors.green : Theme.of(context).colorScheme.outline,
+        color: isActive ? colors.primary : colors.onSurfaceVariant,
       ),
-      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        up ? 'DSH 服务在线,会话可用' : '连接中断,自动重连中',
-        style: const TextStyle(fontSize: 12),
-      ),
+      title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (!up && widget.onReconnect != null)
+          if (isActive && !up && widget.onReconnect != null)
             IconButton(
               tooltip: '重连',
               icon: const Icon(Icons.refresh, size: 20),
@@ -425,40 +433,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 color: Theme.of(context).colorScheme.error,
               ),
               onPressed: () =>
-                  _confirmRemoveHost(context, host, isActive: true),
+                  _confirmRemoveHost(context, host, isActive: isActive),
             ),
         ],
       ),
-    );
-  }
-
-  /// 其他已配对主机行:点击切换(整代重装到该网关);行尾删除。
-  Widget _otherHostTile(BuildContext context, StoredCredentials host) {
-    final label = host.hostLabel.isEmpty
-        ? host.baseUri.authority
-        : host.hostLabel;
-    return ListTile(
-      leading: const Icon(Icons.lan_outlined, size: 20),
-      title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        host.hostLabel.isEmpty ? '点击切换到此主机' : host.baseUri.authority,
-        style: const TextStyle(fontSize: 12),
-      ),
-      trailing: widget.onRemoveHost == null
-          ? const Icon(Icons.swap_horiz, size: 18)
-          : IconButton(
-              tooltip: '删除主机',
-              icon: Icon(
-                Icons.delete_outline,
-                size: 20,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              onPressed: () =>
-                  _confirmRemoveHost(context, host, isActive: false),
-            ),
-      onTap: widget.onSwitchHost == null
-          ? null
-          : () => widget.onSwitchHost!(host.id),
+      onTap: !isActive && widget.onSwitchHost != null
+          ? () => widget.onSwitchHost!(host.id)
+          : null,
     );
   }
 

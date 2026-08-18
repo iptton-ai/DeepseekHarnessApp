@@ -22,6 +22,7 @@ import 'package:singleman/sessions/directory_store.dart';
 import 'package:singleman/sessions/goal_store.dart';
 import 'package:singleman/sessions/interactor_store.dart';
 import 'package:singleman/sessions/job_store.dart';
+import 'package:singleman/sessions/session_attention_store.dart';
 import 'package:singleman/sessions/session_store.dart';
 import 'package:singleman/sessions/settings_store.dart';
 import 'package:singleman/sessions/subagent_store.dart';
@@ -41,7 +42,11 @@ import 'package:singleman/ui/theme_mode_row.dart';
 
 const kDefaultBase = 'http://127.0.0.1:3080';
 
-final navigatorKey = GlobalKey<NavigatorState>();
+/// 每代 boot 各自的 Navigator 全局键(在 boot() 内创建,经 SinglemanApp
+/// 注入 MaterialApp)。**严禁跨代共享**:换键整树重挂时,同键的新
+/// MaterialApp 会把旧代已停用的 Navigator 元素经 GlobalKey 改宗机制
+/// 「认领」回来 —— 旧路由与旧 home(旧 vm/store 的整个界面)过继到新
+/// 树,重挂名存实亡(切主机界面不动、仅重启可见的根因)。
 
 /// ThemeStore 的 SettingsStore 适配通道(ui-theme 命名空间 + host 帧失效转发)。
 /// 照抄 test/sessions/theme_store_test.dart 的 _ScopeChannel。
@@ -118,6 +123,11 @@ Future<void> main() async {
 /// 上一次 boot 的活动连接(换 base 整代重装时释放,防旧退避循环永驻)。
 ConnectionController? _activeConnection;
 
+/// 测试钩子:当前活动连接 —— boot×N 重挂测试的 teardown 释放用
+/// (清 describe 超时/退避计时器;生产代码不得调用)。
+@visibleForTesting
+ConnectionController? get activeConnectionForTest => _activeConnection;
+
 /// 整代重装:释放旧连接(退避 Timer/双 WS),以新计划重跑 boot。
 /// 配对到新网关 / 设置页切换主机 / 删除活动主机共用这一条路径。
 void _reboot(
@@ -129,6 +139,9 @@ void _reboot(
   final old = _activeConnection;
   _activeConnection = null;
   unawaited(old?.dispose());
+  // 支持锚点(flutter run 控制台):整代重装是否真的发生、装到哪台。
+  debugPrint('reboot: active=${hosts.book.value.active?.id} '
+      'base=${plan.baseUri}');
   boot(
     plan: plan,
     hosts: hosts,
@@ -146,6 +159,9 @@ void boot({
 }) {
   final authHeaders = plan.tokenProvider.authHeaders;
   final base = plan.baseUri;
+  // 本代专属 Navigator 键(见顶部注释:跨代共享会被 GlobalKey 改宗
+  // 机制把旧界面整体过继回来,毁掉换键重挂)。
+  final navKey = GlobalKey<NavigatorState>();
 
   final api = ApiClient(baseUri: base, authHeaders: authHeaders);
   final connection = ConnectionController(
@@ -158,7 +174,9 @@ void boot({
   // W1 集成:四个新域 store,共用 api + connection(见 PLAN「W1 集成规格」)。
   final workspaces = WorkspaceStore(api: api, connection: connection);
   final jobs = JobStore(api: api, connection: connection);
-  final subagents = SubagentStore(api: api, connection: connection);
+  // 子代理域注入会话摘要流:后代聚合(入口计数/可见性)+ 行内标题/指标。
+  final subagents = SubagentStore(
+      api: api, connection: connection, summaries: store.summaries);
   final settings = SettingsStore(api: api, connection: connection);
   // 工作模式域(Agent 预设;composer 上方行 + web hero agentPreset 对齐)。
   final agentPresets = AgentPresetStore(api: api, connection: connection);
@@ -175,6 +193,8 @@ void boot({
   );
   final directory = DirectoryBrowserStore(api: api);
   final attachments = AttachmentFetcher(api: api);
+  // A8 goal 域(GoalPanel 动作;数据走会话 goal 投影)。
+  final goals = GoalStore(api: api);
   // W3 集成:主题(ui-theme 命名空间 CAS)。消息反馈(FeedbackStore)
   // 已从消息流移除 —— web 侧该功能走可选插件 slot,本机 web 未装,
   // 客户端不对齐出 web 没有的 UI;域与组件保留,web 启用后可再挂。
@@ -199,18 +219,30 @@ void boot({
     seedMachine: plan.seedMachine,
   )..start();
 
-  final vm = ChatViewModel(store: store, connection: connection)
-    ..interactor = interactor;
+  // M5 会话行状态域:未读/错误/待输入折叠 + 到达事件(振动/弹窗源)。
+  final attention = SessionAttentionStore(
+    sessions: store,
+    interactor: interactor,
+    connection: connection,
+  );
 
-  // 登录成功(首登/手动配置/令牌失效后的重登):入簿(同网关原地刷新
-  // 令牌,新网关追加)→ 激活。base 变化 → 整代重装(所有 store 持有旧
-  // base 的 ApiClient),旧连接释放。
+  final vm = ChatViewModel(store: store, connection: connection)
+    ..interactor = interactor
+    ..attention = attention;
+
+  // 登录成功(首登/手动配置/令牌失效后的重登):入簿(同宿主原地刷新
+  // 令牌,新网关/新宿主追加)→ 激活。base 变化或活动条目变化 → 整代重装
+  // (所有 store 持有旧 base 的 ApiClient;同网关不同宿主虽 base 相同,
+  // 但令牌路由到不同上游,旧 store 的会话/历史不属于新宿主,必须重装),
+  // 旧连接释放。
   Future<void> onLoginDone(RemoteLoginSuccess success) async {
+    final previousActiveId = hosts.book.value.active?.id;
     await hosts.adopt(success);
+    final activeChanged = hosts.book.value.active?.id != previousActiveId;
     plan.tokenProvider.token = success.token;
     hostStatus.seedMachine(success.hostLabel);
     hostStatus.refreshAuthed();
-    if (success.baseUri != base) {
+    if (success.baseUri != base || activeChanged) {
       _reboot(
         planForBook(hosts.book.value, mobileFirst: mobileFirst),
         hosts,
@@ -226,11 +258,14 @@ void boot({
     }
   }
 
-  // 设置页「连接」分区:切换主机(活动指针翻转 + 整代重装到目标网关)。
+  // 设置页「连接」分区:切换主机(活动指针翻转 + 整代重装到目标宿主)。
+  // 多宿主网关下同网关地址可有多条 —— 比较对象是条目 id(复合键)而非
+  // 裸网关地址:同宿主重连不重装,同网关不同宿主(令牌/上游不同)要重装。
   Future<void> onSwitchHost(String hostId) async {
+    final previousActiveId = hosts.book.value.active?.id;
     final target = await hosts.switchTo(hostId);
-    if (target == null ||
-        hostIdForBase(target.baseUri) == hostIdForBase(base)) {
+    if (target == null || hostId == previousActiveId) {
+      debugPrint('host-switch: skip (target=$target, same=$previousActiveId)');
       return;
     }
     _reboot(
@@ -267,7 +302,7 @@ void boot({
 
   // 设置中心「连接」分区:发起配对(主鉴权入口,RemoteAuthClient 同源双角色)。
   void openPairing() {
-    final ctx = navigatorKey.currentContext;
+    final ctx = navKey.currentContext;
     if (ctx == null) return;
     Navigator.of(ctx).push(
       MaterialPageRoute<void>(
@@ -292,15 +327,24 @@ void boot({
       _ScopeOnboardingChannel(settings),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final ctx = navigatorKey.currentContext;
+      final ctx = navKey.currentContext;
       if (ctx != null) {
         await maybeShowWelcomeOnboarding(ctx, controller: onboarding);
       }
     });
   }
 
+  // 多宿主网关下同网关可有多条(复合键 id),排除当前连接用活动条目 id
+  // 而非裸网关地址。
+  final connectedHostId = hosts.book.value.active?.id;
   runApp(
+    // 键 = 本代连接的活动主机身份。二次 runApp 会按类型复用元素树:
+    // 不换键的话,WorkspaceBrowser/主题壳/连接门卫等旧 State 会跨代存续,
+    // 订阅仍挂在已释放的旧 store 流上 —— 切主机后会话列表永远停在旧
+    // 主机的快照。键翻转 → 整树重挂,新 State 绑定新 store,侧栏经
+    // loading 态过渡到新主机的会话列表。
     _ConnectionGate(
+      key: ValueKey('boot-' + (connectedHostId ?? base.toString())),
       connection: connection,
       baseUri: base,
       needsLogin: plan.needsLogin,
@@ -308,12 +352,13 @@ void boot({
       // 令牌失效被配对页挡住时,其他已配对主机仍可一键切换(不必重配)。
       otherHosts: [
         for (final h in hosts.book.value.hosts)
-          if (h.id != hostIdForBase(base)) h,
+          if (h.id != connectedHostId) h,
       ],
       onSwitchHost: onSwitchHost,
       deviceName: deviceNames?.listenable,
       onSetDeviceName: deviceNames?.set,
       child: SinglemanApp(
+        navigatorKey: navKey,
         vm: vm,
         onNewSession: (workspaceId) async {
           try {
@@ -346,7 +391,7 @@ void boot({
           onPickModel: () async {
             final sid = vm.selectedId;
             if (sid == null) return;
-            final ctx = navigatorKey.currentContext;
+            final ctx = navKey.currentContext;
             if (ctx == null) return;
             final result = await showModelPicker(
               ctx,
@@ -410,6 +455,7 @@ void boot({
         directory: directory,
         attachments: attachments,
         theme: theme,
+        goals: goals,
         onCancelSession: (sessionId) async {
           try {
             await interactor.cancelSession(sessionId);
@@ -435,6 +481,7 @@ void boot({
 /// 多主机形态:簿里还有其他主机时,配对页尾部提供切换入口。
 class _ConnectionGate extends StatefulWidget {
   const _ConnectionGate({
+    super.key,
     required this.connection,
     required this.baseUri,
     required this.needsLogin,
@@ -532,6 +579,7 @@ class SinglemanApp extends StatelessWidget {
     this.attachments,
     this.theme,
     this.onCancelSession,
+    this.goals,
     this.onOpenPairing,
     this.hostStatus,
     this.hosts,
@@ -540,9 +588,14 @@ class SinglemanApp extends StatelessWidget {
     this.onReconnect,
     this.deviceName,
     this.onSetDeviceName,
+    this.navigatorKey,
   });
 
   final ChatViewModel vm;
+
+  /// 本代 Navigator 键(boot() 创建注入;每代一份,防 GlobalKey 跨代
+  /// 改宗把旧界面过继回来 —— 见文件顶部注释)。
+  final GlobalKey<NavigatorState>? navigatorKey;
 
   /// 新建会话;workspaceId 非空 = 归入该工作区。
   final Future<void> Function(String? workspaceId) onNewSession;
@@ -563,6 +616,9 @@ class SinglemanApp extends StatelessWidget {
   final AttachmentFetcher? attachments;
   final ThemeStore? theme;
   final void Function(String sessionId)? onCancelSession;
+
+  /// A8 goal 域(透传 ChatScreen → GoalPanel)。
+  final GoalStore? goals;
 
   // M6/M6.1 远程连接入口(透传 ChatScreen → 设置中心「连接」分区)。
   final VoidCallback? onOpenPairing;
@@ -608,6 +664,7 @@ class SinglemanApp extends StatelessWidget {
             attachments: attachments,
             theme: theme,
             onCancelSession: onCancelSession,
+            goals: goals,
             onOpenPairing: onOpenPairing,
             hostStatus: hostStatus,
             deviceName: deviceName,

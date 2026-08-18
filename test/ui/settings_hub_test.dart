@@ -333,8 +333,7 @@ void main() {
       token: 't2',
     );
 
-    testWidgets('主机列表:活动行实时相位 + 其他主机行 + 添加主机常驻',
-        (tester) async {
+    testWidgets('主机列表:稳定单列表 + 选中态 + 添加主机常驻', (tester) async {
       final hosts = ValueNotifier(HostBook(hosts: [gw1, gw2], activeId: gw1.id));
       final status = ValueNotifier<HostStatus>(
         const HostStatus(authed: true, up: true, machine: 'MacA-实时'),
@@ -352,7 +351,13 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('已连接 · MacA-实时'), findsOneWidget);
+      // 稳定列表:每台主机一行,标题=簿内标识(hostLabel>网关地址);
+      // 选中态图标(活动=check_circle,其余=radio_button_unchecked)。
+      expect(find.text('MacA'), findsOneWidget);
+      expect(find.text('已连接 · MacA-实时'), findsOneWidget,
+          reason: '活动行副标题承载实时机器名与相位');
+      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.byIcon(Icons.radio_button_unchecked), findsOneWidget);
       // 其他主机行:无机器名回落 authority,副标题提示可切换。
       expect(find.text('gw2.example.com'), findsOneWidget);
       expect(find.text('点击切换到此主机'), findsOneWidget);
@@ -360,8 +365,17 @@ void main() {
       expect(find.text('添加主机(配对)'), findsOneWidget);
       // 每行都有删除按钮。
       expect(find.byIcon(Icons.delete_outline), findsNWidgets(2));
-      // 已连接的活动行没有重连按钮(绿点 + 删除即可)。
+      // 已连接的活动行没有重连按钮(选中态 + 删除即可)。
       expect(find.byTooltip('重连'), findsNothing);
+
+      // 切换后列表不重排:两行仍在原位,仅选中态/相位副标题换位。
+      hosts.value = HostBook(hosts: [gw1, gw2], activeId: gw2.id);
+      await tester.pump();
+      expect(find.text('MacA'), findsOneWidget, reason: '原活动行不再消失');
+      expect(find.text('gw2.example.com'), findsOneWidget);
+      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.text('点击切换到此主机'), findsNothing,
+          reason: 'gw2 已是活动行,切换提示让位给相位副标题');
     });
 
     testWidgets('未连接的活动行:重连按钮真实可点(修「点了没反应」)',
@@ -383,7 +397,8 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('MacA · 未连接'), findsOneWidget);
+      expect(find.text('MacA'), findsOneWidget);
+      expect(find.text('连接中断,自动重连中'), findsOneWidget);
       final btn = find.byTooltip('重连');
       expect(btn, findsOneWidget);
       await tester.tap(btn);

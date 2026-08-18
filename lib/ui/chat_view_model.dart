@@ -7,7 +7,10 @@ import 'package:singleman/connection/connection_controller.dart';
 import 'package:singleman/sessions/event_nodes.dart';
 import 'package:singleman/sessions/event_text.dart';
 import 'package:singleman/sessions/interactor_store.dart';
+import 'package:singleman/sessions/session_attention_store.dart';
+import 'package:singleman/sessions/session_stats.dart';
 import 'package:singleman/sessions/session_store.dart';
+import 'package:singleman/ui/stream_rebuild_throttle.dart';
 import 'package:singleman/ui/todo_panel.dart'
     show SessionTodoItem, backscanSessionTodos;
 import 'package:singleman/wire/generated/wire_generated.dart';
@@ -94,6 +97,9 @@ class ChatViewModel extends ChangeNotifier {
   // 生命周期:仅选中会话(懒注册)、切换即弃(view 不跨会话/不跨代保留)。
   List<ChatNode> _nodes = <ChatNode>[];
   List<SessionTodoItem> _todos = <SessionTodoItem>[];
+
+  // A3 会话统计(投影优先/本地折叠兜底;随日志重建一起重算)。
+  SessionStats _stats = const SessionStats();
   final Map<int, ToolEventView> _viewsSelected = <int, ToolEventView>{};
   StreamSubscription<MuxFrame>? _viewsSub;
   final List<ChatBubble> _ephemeral = <ChatBubble>[];
@@ -150,6 +156,26 @@ class ChatViewModel extends ChangeNotifier {
   /// 当前会话的任务清单(todo/write 投影;空 = 无清单或已随新一轮退役)。
   List<SessionTodoItem> get todos => List.unmodifiable(_todos);
 
+  /// 当前会话统计(A3;空会话为全零,UI 零渲染)。
+  SessionStats get stats => _stats;
+
+  /// A8 goal 投影(web GoalDock 的 'goal' projection 同源):
+  /// 值 = {goal:{id,revision,objective,phase,maxGoalRounds},roundsStarted,…}
+  /// 或 null(无 goal);投影缺失时回退折叠 goal/change 事件。
+  Map<String, dynamic>? get selectedGoalProjection {
+    final log = logForSelected;
+    if (log == null) return null;
+    final proj = log.projections['goal'];
+    if (proj is Map) return Map<String, dynamic>.from(proj);
+    // 回退:最新一条 goal/change 的投影形 data(kind/version/operation 剔除)。
+    for (final e in log.events.reversed) {
+      if (e.type != 'goal/change' || e.data is! Map) continue;
+      final d = Map<String, dynamic>.from(e.data as Map);
+      if (d['goal'] is Map) return d;
+    }
+    return null;
+  }
+
   /// 当前会话的节点流(空日志为空列表;UI 优先用它,bubbles 保留为兜底)。
   /// 乐观占位(刚发送、真帧未回流)以负数 seq 的 ChatNodeUser 追加在尾:
   /// 节点流渲染路径与 bubbles 路径的即发即见体验对齐。
@@ -167,6 +193,23 @@ class ChatViewModel extends ChangeNotifier {
 
   // M3 交互帧(interactor 可为 null:纯聊天场景/测试)。
   InteractorStore? interactor;
+
+  // M5 会话行状态域(unread/error/needsInput 折叠;null = 侧栏回退仅
+  // running 动画)。赋值即订阅:attention 变化透传 notifyListeners,
+  // 整屏(侧栏行)随之刷新。
+  SessionAttentionStore? _attention;
+
+  SessionAttentionStore? get attention => _attention;
+
+  set attention(SessionAttentionStore? value) {
+    _attention?.removeListener(_onAttentionChanged);
+    _attention = value;
+    // 挂接即同步当前选中(构造后链式赋值时 select 可能已先行)。
+    value?.markVisited(_selectedId);
+    value?.addListener(_onAttentionChanged);
+  }
+
+  void _onAttentionChanged() => notifyListeners();
 
   /// 选中会话的历史尾页装载中(切换会话到装载完成之间为 true)。
   /// 非空会话在装载完成前应显示加载态,而非空白会话的空态 UI。
@@ -190,12 +233,13 @@ class ChatViewModel extends ChangeNotifier {
   void select(String sessionId) {
     if (_selectedId == sessionId) return;
     _selectedId = sessionId;
+    // 进入即读:清该行未读/错误标记(M5 语义;待审批标记由 resolved 清)。
+    _attention?.markVisited(sessionId);
     _bubbles.clear();
     _ephemeral.clear();
     _viewsSelected.clear();
     _eventsSub?.cancel();
-    _rebuildTimer?.cancel();
-    _rebuildTimer = null;
+    _rebuild.reset();
     final log = _store.logFor(sessionId);
     _lastEventCount = log.events.length; // 换会话:增量基准重置
     _rebuildFromLog(log);
@@ -265,27 +309,13 @@ class ChatViewModel extends ChangeNotifier {
     }
   }
 
-  /// 流式重建节流(两层 + 分档):
-  /// ① microtask 合并 —— 同一事件循环排空内多次日志变更只重算一次
-  ///   (extractNodes 是 O(n);逐帧重算会卡流式渲染,见 PROGRESS 性能回写)。
-  /// ② 时间窗节流 —— 流式 delta 是逐帧到达的**独立事件循环轮次**,
-  ///   microtask 合并不了跨轮变更:每个 delta 仍会各自触发一次
-  ///   O(n) 重算 + 整屏 rebuild,think/文本高频流(几十~上百 delta/s)
-  ///   会饱和 UI 线程、饿死输入事件(microtask 本身不产生让出点)。
-  /// ③ 分档 —— 事件**类型**决定时效要求:
-  ///   - 纯 assistant/chunk 追加(只是尾部长文本变长):慢档
-  ///     [_kStreamInterval](250ms 一次;打字/尾随滚动的跳进感可接受,
-  ///     换来滚动稳定流畅 —— 全量重算 + 流式文本重布局不再是每秒 15 次);
-  ///   - 其他任何新事件(新节点/工具卡/轮次定界/历史页):立即落地,
-  ///     结构变化一帧不等待。
-  /// 慢档内:空闲后首个 delta 立即(leading,体感即时),窗口内后续
-  /// 变更推迟到尾沿 Timer 统一落地(trailing,流结束的最终帧必达)。
-  static const Duration _kStreamInterval = Duration(milliseconds: 250);
+  /// 流式重建节流:与子代理 transcript 页共用同一节拍器
+  /// [StreamRebuildThrottle](microtask 合并 + 250ms 慢档 + 快慢分档;
+  /// 策略细节与性能依据见该文件头注释)。
+  late final StreamRebuildThrottle _rebuild = StreamRebuildThrottle(
+    onFlush: _onThrottleFlush,
+  );
 
-  bool _rebuildQueued = false;
-  bool _rebuildSlow = false;
-  Timer? _rebuildTimer;
-  DateTime _lastFlush = DateTime.fromMillisecondsSinceEpoch(0);
   int _lastEventCount = 0;
 
   void _onLogEvents(SessionLog log, List<SessionEvent> events) {
@@ -297,36 +327,18 @@ class ChatViewModel extends ChangeNotifier {
     _lastEventCount = events.length;
     final slow = fresh.isNotEmpty &&
         fresh.every((e) => e.type == 'assistant/chunk');
-    _scheduleRebuild(log, slow: slow);
+    _rebuild.schedule(log, slow: slow);
   }
 
-  void _scheduleRebuild(SessionLog log, {required bool slow}) {
-    if (_rebuildQueued) {
-      // 已排队的合并批次若含快档请求,保持快档(不能被后到的慢档降级)。
-      if (!slow) _rebuildSlow = false;
-      return;
-    }
-    _rebuildQueued = true;
-    _rebuildSlow = slow;
-    scheduleMicrotask(() {
-      _rebuildQueued = false;
-      final sinceLast = DateTime.now().difference(_lastFlush);
-      final interval = _kStreamInterval;
-      if (!_rebuildSlow || sinceLast >= interval) {
-        _flushRebuild(log);
-      } else {
-        // 慢档窗口内:推迟到尾沿;delta 持续涌入时每窗口至多一次重算。
-        _rebuildTimer ??= Timer(interval - sinceLast, () {
-          _rebuildTimer = null;
-          // 切换会话后旧日志的尾沿定时器可能仍挂着:只重建仍选中的会话。
-          if (_selectedId == log.sessionId) _flushRebuild(log);
-        });
-      }
-    });
+  /// 节流落地:token = 排队批次所属日志;切换会话后旧日志的尾沿定时器
+  /// 可能仍挂着,只重建仍选中的会话。
+  void _onThrottleFlush(Object? token) {
+    final log = token as SessionLog?;
+    if (log == null || _selectedId != log.sessionId) return;
+    _flushRebuild(log);
   }
 
   void _flushRebuild(SessionLog log) {
-    _lastFlush = DateTime.now();
     _rebuildFromLog(log);
     _pruneEphemeral();
     notifyListeners();
@@ -354,6 +366,8 @@ class ChatViewModel extends ChangeNotifier {
     // 任务清单投影(web backscanTodos):最后一条 todo/write 未被更新的
     // turn/start 退役时即当前清单;随日志重建一起重算。
     _todos = backscanSessionTodos(log.events);
+    // A3 统计条:投影优先(整日志口径),缺失走本地窗口折叠。
+    _stats = sessionStatsOf(log.events, log.projections);
   }
 
   ChatBubble? _bubbleFor(SessionEvent event) {
@@ -403,11 +417,11 @@ class ChatViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    _attention?.removeListener(_onAttentionChanged);
     _summariesSub?.cancel();
     _eventsSub?.cancel();
     _viewsSub?.cancel();
-    _rebuildTimer?.cancel();
-    _rebuildTimer = null;
+    _rebuild.dispose();
     super.dispose();
   }
 }

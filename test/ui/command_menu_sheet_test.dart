@@ -252,4 +252,68 @@ void main() {
     expect(find.text('没有可用命令或技能'), findsOneWidget);
     expect(find.byKey(const ValueKey('command-menu-search')), findsOneWidget);
   });
+
+  testWidgets('extraItems:客户端 contribution 并入命令组;与宿主目录重名跳过;搜索过滤生效',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final picked = <String>[];
+    final store = _FakeCommandStore();
+    // 宿主目录已有 export;extra 同时给 model(新增)与 export(重名)。
+    store.menu = _menu(
+      [_cmd('export', '导出会话 ZIP')],
+      const <SkillEntry>[],
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => Center(
+            child: ElevatedButton(
+              onPressed: () => showCommandMenu(
+                context,
+                sessionId: 'session-s1',
+                store: store,
+                onPick: (item) => picked.add(item.slash),
+                extraItems: [
+                  CommandMenuItem.command(
+                    const CommandEntry(name: 'model', description: '切换模型'),
+                  ),
+                  CommandMenuItem.command(
+                    const CommandEntry(name: 'export', description: '客户端重名项'),
+                  ),
+                ],
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // model 并入命令组;/export 仅宿主一份(重名 extra 跳过,无重复行)。
+    expect(find.text('/model'), findsOneWidget);
+    expect(find.byKey(const ValueKey('command-item-model')), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('command-item-export')), findsOneWidget);
+    expect(find.textContaining('客户端重名项'), findsNothing);
+
+    // 搜索过滤对 extra 行同样生效。
+    await tester.enterText(
+        find.byKey(const ValueKey('command-menu-search')), 'mo');
+    await tester.pump();
+    expect(find.text('/model'), findsOneWidget);
+    expect(find.text('/export'), findsNothing);
+
+    // 点击 extra 行 → onPick('/model')。
+    await tester.enterText(
+        find.byKey(const ValueKey('command-menu-search')), '');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('command-item-model')));
+    await tester.pumpAndSettle();
+    expect(picked, ['/model']);
+  });
 }
