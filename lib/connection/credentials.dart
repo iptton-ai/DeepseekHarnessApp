@@ -9,16 +9,19 @@
 // 旧单对象文件读入时迁移为一元簿。
 import 'dart:convert';
 
-/// 主机簿条目(= 一台已配对网关)。
+/// 主机簿条目(= 一台已配对宿主)。多宿主网关下同一网关地址可有多条 ——
+/// 各带不同 hostRef(宿主稳定标识)。
 class StoredCredentials {
   const StoredCredentials({
     required this.id,
     required this.baseUri,
     this.token,
     this.hostLabel = '',
+    this.hostRef = '',
   });
 
-  /// 条目 id:网关地址归一化([hostIdForBase])。同 id 配对 = 原地刷新。
+  /// 条目 id:网关地址归一化([hostIdForBase])+ 宿主标识复合([hostIdFor])。
+  /// 同 id 配对 = 原地刷新;同网关不同宿主 = 不同条目。
   final String id;
 
   final Uri baseUri;
@@ -29,16 +32,21 @@ class StoredCredentials {
   /// 配对来源机器名快照(展示用;密码登录/旧凭证为空)。
   final String hostLabel;
 
+  /// 来源宿主稳定标识(rust = 隧道端口字符串;CF = 隧道主机名;旧网关为空)。
+  /// 非空时参与条目 id 复合;持久化以便簿重载后保持键稳定。
+  final String hostRef;
+
   @override
   bool operator ==(Object other) =>
       other is StoredCredentials &&
       other.id == id &&
       other.baseUri == baseUri &&
       other.token == token &&
-      other.hostLabel == hostLabel;
+      other.hostLabel == hostLabel &&
+      other.hostRef == hostRef;
 
   @override
-  int get hashCode => Object.hash(id, baseUri, token, hostLabel);
+  int get hashCode => Object.hash(id, baseUri, token, hostLabel, hostRef);
 }
 
 /// 网关地址归一化(条目去重键):scheme/host 小写,默认端口显式化,
@@ -52,6 +60,12 @@ String hostIdForBase(Uri base) {
   final port = base.port == 0 ? 80 : base.port;
   return '$scheme://$host:$port';
 }
+
+/// 条目 id:同网关多宿主 = 地址归一化 + '#' + 宿主标识复合(2026-08-18
+/// 多宿主网关改造)。[hostRef] 为空(旧网关/密码登录)= 裸网关地址(旧语义,
+/// 同网关原地刷新)。
+String hostIdFor(Uri base, String hostRef) =>
+    hostRef.isEmpty ? hostIdForBase(base) : '${hostIdForBase(base)}#$hostRef';
 
 /// 主机簿:全部已配对主机 + 活动指针。
 /// 单活动(方案 A):同一时刻只连一台;切换由上层整代重装实现,
@@ -150,6 +164,7 @@ Map<String, dynamic> _hostToJson(StoredCredentials c) => <String, dynamic>{
   'baseUri': c.baseUri.toString(),
   if (c.token != null) 'token': c.token,
   if (c.hostLabel.isNotEmpty) 'hostLabel': c.hostLabel,
+  if (c.hostRef.isNotEmpty) 'hostRef': c.hostRef,
 };
 
 /// 主机簿 JSON 编码(v2 形状;文件实现复用)。
@@ -166,6 +181,7 @@ StoredCredentials? _hostFromJson(Map<dynamic, dynamic> raw) {
   if (base == null || !base.hasScheme || base.host.isEmpty) return null;
   final token = raw['token'];
   final hostLabel = raw['hostLabel'];
+  final hostRef = raw['hostRef'];
   final id = raw['id'];
   return StoredCredentials(
     // id 缺失/非法时由地址重新归一(旧 v2 文件兜底)。
@@ -173,6 +189,7 @@ StoredCredentials? _hostFromJson(Map<dynamic, dynamic> raw) {
     baseUri: base,
     token: token is String && token.isNotEmpty ? token : null,
     hostLabel: hostLabel is String ? hostLabel : '',
+    hostRef: hostRef is String ? hostRef : '',
   );
 }
 

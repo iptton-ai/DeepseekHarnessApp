@@ -21,6 +21,11 @@
 **决策**:先做 macOS/Windows 桌面版(loopback 零配置、全功能含配置面),跑通后再做手机 LAN 版(隐藏 loopback 特权面)。公网形态冻结,直到上游出认证层。
 **原因**:信任围栏的分级(见 DSH-PROTOCOL.md §6)让桌面版的工程量与风险都最小;手机版只是连接配置 + UI 适配差异。
 
+### ADR-0005 网关多宿主/多租户:共享实例租户层(2026-08-18)
+**决策**:两版网关(rust/CF Worker)在同一实例内落地「多宿主 + 多租户」而非每租户独立部署。rust:004 迁移(tenants/hosts 表)+ 公开面租户钥端点(未登记租户恒 401 = 旧部署零暴露)+ claim 端口归属仲裁;CF:DO schema 同构 + `ADMIN_KEY`=运营者超管/租户钥围栏。数据面令牌逐行绑定宿主(rust=隧道端口 `host_ref`,CF=隧道主机名),配对协议原生多宿主(同码多 offers 人工点选)。App 主机簿条目 id 改复合键(网关归一化 + `#hostRef`),同宿主重配原地刷新、同网关异宿主独立条目、legacy 条目被复合键条目自动取代;`onLoginDone`/`onSwitchHost` 按「活动条目变化」判重装(同网关异宿主必须整代重装)。
+**原因**:两网关数据面本就按令牌逐行路由(端口/隧道主机名),多宿主是收尾;多租户的硬骨头在信任根(管理面)与越权面(devices/revoke/配对命名空间),全部收敛为「tenants 表 + 按钥解析 + 租户列过滤」一条路。每租户独立部署(rust+nginx 分流 / CF Deploy Button)保留为零代码替代路径。
+**代价**:rust Web 面仍是运营者单宿主形态;rust 131xx 端口最终防线仍依赖服务器 ssh 层(租户给受限账号 + sshd PermitListen);CF 多租户 Access 策略必须精确引用 service token(`any_valid_service_token` 跨租户放行)。
+
 ## 里程碑
 
 ### M0 契约与测试床(串行,最高优先)✅ 2026-08-14 完成

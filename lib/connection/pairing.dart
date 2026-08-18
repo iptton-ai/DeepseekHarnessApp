@@ -307,10 +307,15 @@ mixin PairingClientMixin implements RemotePairing {
     // 来源机器名回显(网关从 claim 的 host_label 快照;设置页「已连接 xxx」的
     // 种子 —— 运行时以 /pair/api/host 的当前值为准,这里只做首显)。
     final hostLabel = resp['host_label'];
+    // 来源宿主稳定标识(rust 形态 = 隧道端口字符串;CF 形态 = 隧道主机名;
+    // 旧网关无此字段 = 空)。主机簿复合键用:同一网关后面的不同宿主 = 不同
+    // 条目,同宿主重配 = 原地刷新。
+    final hostRef = resp['host_ref'];
     return RemoteLoginSuccess(
       baseUri: session.baseUri,
       token: token,
       hostLabel: hostLabel is String ? hostLabel : '',
+      hostRef: hostRef is String ? hostRef : '',
     );
   }
 }

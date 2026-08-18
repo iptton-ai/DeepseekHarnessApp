@@ -32,12 +32,18 @@ class RemoteLoginSuccess {
     required this.baseUri,
     required this.token,
     this.hostLabel = '',
+    this.hostRef = '',
   });
   final Uri baseUri;
   final String token;
 
   /// 来源机器名(配对确认响应回显;密码登录为空)。展示用,非凭证。
   final String hostLabel;
+
+  /// 来源宿主稳定标识(rust 网关 = 隧道端口;CF Worker = 隧道主机名;
+  /// 旧网关/密码登录为空)。主机簿复合键:同一网关后面的不同宿主 = 不同条目,
+  /// 同宿主重配 = 原地刷新。
+  final String hostRef;
 }
 
 /// 登录失败(密码错/限速/网关不可达),message 面向用户。
